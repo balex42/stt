@@ -235,7 +235,7 @@ self.addEventListener('message', async ({ data: msg }) => {
   if (msg.type === 'load') {
     try {
       const tfUrl = msg.localVendor
-        ? '/vendor/transformers.js'
+        ? msg.baseUrl + '/vendor/transformers.js'
         : 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3/+esm';
       ({ pipeline, WhisperTextStreamer, env } = await import(tfUrl));
       if (msg.localVendor) {
