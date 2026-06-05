@@ -211,8 +211,6 @@
 // ---------------------------------------------------------------------------
 const WHISPER_MODEL = 'onnx-community/whisper-large-v3-turbo';
 
-const GEMMA_MODEL = '/models/gemma/gemma-4-E2B-it-web.litertlm';
-
 const SYSTEM_PROMPT = `Du bist ein professioneller Meetingsekretär.
 Erstelle auf Basis des gegebenen Meetingtranskripts ein strukturiertes Meetingprotokoll auf Deutsch.
 Gib NUR gültiges JSON zurück — keine Markdown-Umrandungen, keine Erklärungen, keinen zusätzlichen Text.
@@ -230,15 +228,24 @@ Schreibe alle Textwerte auf Deutsch.`;
 // Whisper Web Worker source (runs inference off the main thread)
 // ---------------------------------------------------------------------------
 const WHISPER_WORKER_SRC = `
-import { pipeline, WhisperTextStreamer, env } from '/vendor/transformers.js';
+let pipeline, WhisperTextStreamer, env;
+let workerLocalVendor = false;
+try {
+  ({ pipeline, WhisperTextStreamer, env } = await import('/vendor/transformers.js'));
+  workerLocalVendor = true;
+} catch {
+  ({ pipeline, WhisperTextStreamer, env } = await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@3/+esm'));
+}
 
 let asr = null;
 
 self.addEventListener('message', async ({ data: msg }) => {
   if (msg.type === 'load') {
     try {
-      env.backends.onnx.wasm.wasmPaths = msg.baseUrl + '/vendor/ort/';
-      env.remoteHost = msg.baseUrl + '/models';
+      if (workerLocalVendor) {
+        env.backends.onnx.wasm.wasmPaths = msg.baseUrl + '/vendor/ort/';
+        env.remoteHost = msg.baseUrl + '/models';
+      }
       asr = await pipeline('automatic-speech-recognition', msg.model, {
         device: 'webgpu',
         dtype: { encoder_model: 'fp16', decoder_model_merged: 'q4' },
@@ -288,11 +295,24 @@ if (!hasJSPI) {
 }
 
 // ---------------------------------------------------------------------------
-// Imports
+// Imports — prefer local vendor bundle (Docker), fall back to CDN for dev
 // ---------------------------------------------------------------------------
-const { Engine, loadLiteRtLm } = hasJSPI
-  ? await import('/vendor/litert-lm.js')
-  : { Engine: null, loadLiteRtLm: null };
+let useLocalVendor = false;
+let engineModule   = {};
+if (hasJSPI) {
+  try {
+    engineModule    = await import('/vendor/litert-lm.js');
+    useLocalVendor  = true;
+  } catch {
+    engineModule    = await import('https://cdn.jsdelivr.net/npm/@litert-lm/core/+esm');
+  }
+}
+const { Engine, loadLiteRtLm } = engineModule;
+
+// Gemma model: local in Docker, HuggingFace CDN in dev mode
+const GEMMA_MODEL = useLocalVendor
+  ? '/models/gemma/gemma-4-E2B-it-web.litertlm'
+  : 'https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it-web.litertlm';
 
 // ---------------------------------------------------------------------------
 // State
@@ -555,10 +575,10 @@ async function processBlob(blob) {
     }
 
     if (!llmEngine) {
-      if (loadLiteRtLm && !litrtLmLoadPromise) {
+      if (useLocalVendor && loadLiteRtLm && !litrtLmLoadPromise) {
         litrtLmLoadPromise = loadLiteRtLm('/vendor/litert-lm-wasm/');
       }
-      await litrtLmLoadPromise;
+      if (litrtLmLoadPromise) await litrtLmLoadPromise;
 
       showProgress('Gemma 4 E2B-Modell wird geladen…');
       const modelSrc = await fetchWithOPFSCache(
