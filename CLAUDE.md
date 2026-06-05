@@ -58,3 +58,19 @@ const GEMMA_MODELS  = { E2B: '...', E4B: '...' };
 Both AI singletons (`asr`, `llmEngine`) are lazy — loaded on first use and reused. Switching the E2B/E4B toggle calls `engine.delete()` to free GPU memory before the next load.
 
 Models are downloaded from HuggingFace on first use and cached in the browser's Cache API automatically by the libraries.
+
+## Branch: `gemma-4-stt` (parked)
+
+Experiment to feed audio directly into Gemma 4 via LiteRT-LM JS, removing the
+Whisper transcription step. Currently impossible — both Gemma 4 E2B and E4B
+web variants are text-only ("Currently the model is text-only.").
+
+To unblock, either:
+- wait for LiteRT-LM JS to add an audio modality to Gemma 4, OR
+- switch runtime to `@mediapipe/tasks-genai` + Gemma 3n (E2B / E4B), which
+  supports `supportAudio: true` with single-channel `AudioBuffer` input.
+
+Refs:
+- https://developers.google.com/edge/litert-lm/js
+- https://huggingface.co/litert-community/gemma-4-E4B-it-litert-lm
+- https://developers.google.com/edge/mediapipe/solutions/genai/llm_inference/web_js
