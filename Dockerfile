@@ -1,4 +1,4 @@
-# Stage 1 — download all assets at build time for air-gapped operation
+# Stage 1 — download/build all assets at build time for air-gapped operation
 FROM node:22-alpine AS downloader
 RUN apk add --no-cache curl
 
@@ -7,13 +7,22 @@ RUN mkdir -p vendor/ort vendor/litert-lm-wasm \
     models/onnx-community/whisper-large-v3-turbo/resolve/main/onnx \
     models/gemma
 
-# ── JS bundles (JSDelivr pre-bundled ESM) ──────────────────────────────────
-RUN curl -fsSL 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3/+esm' \
-    -o vendor/transformers.js
-RUN curl -fsSL 'https://cdn.jsdelivr.net/npm/@litert-lm/core/+esm' \
-    -o vendor/litert-lm.js
+# ── litert-lm: npm install + esbuild → self-contained ESM (no CDN imports) ─
+WORKDIR /bundle
+RUN npm install @litert-lm/core esbuild
+RUN node_modules/.bin/esbuild node_modules/@litert-lm/core/dist/index.js \
+    --bundle --format=esm --platform=browser \
+    --outfile=/out/vendor/litert-lm.js
 
-# ── transformers.js WASM (from npm tarball) ────────────────────────────────
+# ── transformers.js: extract pre-built Webpack bundle from npm tarball ─────
+WORKDIR /out
+RUN curl -sL 'https://registry.npmjs.org/@huggingface/transformers/-/transformers-3.8.1.tgz' \
+    -o /tmp/tf-bundle.tgz && \
+    tar -xzOf /tmp/tf-bundle.tgz package/dist/transformers.web.js \
+      > vendor/transformers.js && \
+    rm /tmp/tf-bundle.tgz
+
+# ── transformers.js WASM ───────────────────────────────────────────────────
 RUN curl -sL 'https://registry.npmjs.org/@huggingface/transformers/-/transformers-3.8.1.tgz' \
     -o /tmp/tf.tgz && \
     tar -xzOf /tmp/tf.tgz package/dist/ort-wasm-simd-threaded.jsep.wasm \
@@ -22,7 +31,7 @@ RUN curl -sL 'https://registry.npmjs.org/@huggingface/transformers/-/transformer
       > vendor/ort/ort-wasm-simd-threaded.jsep.mjs && \
     rm /tmp/tf.tgz
 
-# ── litert-lm WASM (from npm tarball) ─────────────────────────────────────
+# ── litert-lm WASM ────────────────────────────────────────────────────────
 RUN curl -sL 'https://registry.npmjs.org/@litert-lm/core/-/core-0.13.1.tgz' \
     -o /tmp/lm.tgz && \
     tar -xzOf /tmp/lm.tgz package/wasm/litertlm_wasm_internal.js \
