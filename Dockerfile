@@ -62,10 +62,12 @@ RUN curl -fsSL \
 
 # Stage 2 — minimal production image
 FROM node:22-alpine
+RUN addgroup -S app && adduser -S -G app app
 WORKDIR /app
 COPY serve.js .
 COPY static/ static/
 COPY --from=downloader /out/vendor static/vendor/
 COPY --from=downloader /out/models static/models/
+USER app
 EXPOSE 8000
 CMD ["node", "serve.js"]

@@ -152,6 +152,17 @@
   }
 
   .download-row { margin-top: 1rem; display: flex; justify-content: flex-end; }
+
+  footer {
+    max-width: 960px;
+    margin: 0 auto 2rem;
+    text-align: center;
+    font-size: 0.78rem;
+    color: #475569;
+    line-height: 1.8;
+  }
+  footer a { color: #64748b; text-decoration: underline; }
+  footer a:hover { color: #94a3b8; }
 </style>
 </head>
 <body>
@@ -204,6 +215,12 @@
     <button class="btn btn-ghost" id="download-btn">Herunterladen (.md)</button>
   </div>
 </div>
+
+<footer>
+  Built with <a href="https://ai.google.dev/gemma" target="_blank" rel="noopener">Gemma 4</a> (Google DeepMind, Apache 2.0) &middot;
+  Transcription by <a href="https://openai.com/research/whisper" target="_blank" rel="noopener">Whisper</a> (OpenAI, MIT) via
+  <a href="https://github.com/huggingface/transformers.js" target="_blank" rel="noopener">Transformers.js</a> (Apache 2.0)
+</footer>
 
 <script type="module">
 // ---------------------------------------------------------------------------

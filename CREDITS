@@ -1,0 +1,28 @@
+# Third-party credits
+
+This project builds on the following open-source libraries and models.
+
+---
+
+## @huggingface/transformers
+- Version: 3.8.1
+- License: Apache 2.0
+- Copyright: Hugging Face, Inc.
+- Source: https://github.com/huggingface/transformers.js
+
+## @litert-lm/core (LiteRT-LM)
+- Version: 0.13.1
+- License: Apache 2.0
+- Copyright: Google LLC
+- Source: https://github.com/google-ai-edge/mediapipe
+
+## Whisper large-v3-turbo (ONNX)
+- Model ID: onnx-community/whisper-large-v3-turbo
+- Base model license: MIT (OpenAI)
+- Source: https://huggingface.co/onnx-community/whisper-large-v3-turbo
+
+## Gemma 4 E2B
+- Model ID: litert-community/gemma-4-E2B-it-litert-lm (LiteRT conversion of google/gemma-4-E2B-it)
+- License: Apache 2.0 (https://ai.google.dev/gemma/apache_2)
+- Copyright: Google DeepMind
+- Source: https://huggingface.co/google/gemma-4-E2B-it
