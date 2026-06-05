@@ -1,4 +1,4 @@
-# Stage 1 — download/build all assets at build time for air-gapped operation
+# Stage 1 — build/download all assets at build time for air-gapped operation
 FROM node:22-alpine AS downloader
 RUN apk add --no-cache curl
 
@@ -7,44 +7,38 @@ RUN mkdir -p vendor/ort vendor/litert-lm-wasm \
     models/onnx-community/whisper-large-v3-turbo/resolve/main/onnx \
     models/gemma
 
-# ── litert-lm: npm install + esbuild → self-contained ESM (no CDN imports) ─
+# ── Install packages and build self-contained ESM bundles with esbuild ─────
 WORKDIR /bundle
-RUN npm install @litert-lm/core esbuild
-RUN node_modules/.bin/esbuild node_modules/@litert-lm/core/dist/index.js \
+RUN npm install @huggingface/transformers@3.8.1 @litert-lm/core@0.13.1 esbuild
+
+# Bundle transformers.js — inlines onnxruntime-common and all other bare deps
+RUN node_modules/.bin/esbuild \
+    node_modules/@huggingface/transformers/dist/transformers.web.js \
+    --bundle --format=esm --platform=browser \
+    --outfile=/out/vendor/transformers.js
+
+# Bundle litert-lm — inlines @litertjs/wasm-utils and all other bare deps
+RUN node_modules/.bin/esbuild \
+    node_modules/@litert-lm/core/dist/index.js \
     --bundle --format=esm --platform=browser \
     --outfile=/out/vendor/litert-lm.js
 
-# ── transformers.js: extract pre-built Webpack bundle from npm tarball ─────
-WORKDIR /out
-RUN curl -sL 'https://registry.npmjs.org/@huggingface/transformers/-/transformers-3.8.1.tgz' \
-    -o /tmp/tf-bundle.tgz && \
-    tar -xzOf /tmp/tf-bundle.tgz package/dist/transformers.web.js \
-      > vendor/transformers.js && \
-    rm /tmp/tf-bundle.tgz
-
-# ── transformers.js WASM ───────────────────────────────────────────────────
-RUN curl -sL 'https://registry.npmjs.org/@huggingface/transformers/-/transformers-3.8.1.tgz' \
-    -o /tmp/tf.tgz && \
-    tar -xzOf /tmp/tf.tgz package/dist/ort-wasm-simd-threaded.jsep.wasm \
-      > vendor/ort/ort-wasm-simd-threaded.jsep.wasm && \
-    tar -xzOf /tmp/tf.tgz package/dist/ort-wasm-simd-threaded.jsep.mjs \
-      > vendor/ort/ort-wasm-simd-threaded.jsep.mjs && \
-    rm /tmp/tf.tgz
-
-# ── litert-lm WASM ────────────────────────────────────────────────────────
-RUN curl -sL 'https://registry.npmjs.org/@litert-lm/core/-/core-0.13.1.tgz' \
-    -o /tmp/lm.tgz && \
-    tar -xzOf /tmp/lm.tgz package/wasm/litertlm_wasm_internal.js \
-      > vendor/litert-lm-wasm/litertlm_wasm_internal.js && \
-    tar -xzOf /tmp/lm.tgz package/wasm/litertlm_wasm_internal.wasm \
-      > vendor/litert-lm-wasm/litertlm_wasm_internal.wasm && \
-    tar -xzOf /tmp/lm.tgz package/wasm/litertlm_wasm_compat_internal.js \
-      > vendor/litert-lm-wasm/litertlm_wasm_compat_internal.js && \
-    tar -xzOf /tmp/lm.tgz package/wasm/litertlm_wasm_compat_internal.wasm \
-      > vendor/litert-lm-wasm/litertlm_wasm_compat_internal.wasm && \
-    rm /tmp/lm.tgz
+# Copy WASM files straight from installed packages (no re-download needed)
+RUN cp node_modules/@huggingface/transformers/dist/ort-wasm-simd-threaded.jsep.wasm \
+       /out/vendor/ort/ && \
+    cp node_modules/@huggingface/transformers/dist/ort-wasm-simd-threaded.jsep.mjs \
+       /out/vendor/ort/
+RUN cp node_modules/@litert-lm/core/wasm/litertlm_wasm_internal.js \
+       /out/vendor/litert-lm-wasm/ && \
+    cp node_modules/@litert-lm/core/wasm/litertlm_wasm_internal.wasm \
+       /out/vendor/litert-lm-wasm/ && \
+    cp node_modules/@litert-lm/core/wasm/litertlm_wasm_compat_internal.js \
+       /out/vendor/litert-lm-wasm/ && \
+    cp node_modules/@litert-lm/core/wasm/litertlm_wasm_compat_internal.wasm \
+       /out/vendor/litert-lm-wasm/
 
 # ── Whisper model JSON configs ─────────────────────────────────────────────
+WORKDIR /out
 RUN BASE=https://huggingface.co/onnx-community/whisper-large-v3-turbo/resolve/main && \
     DEST=models/onnx-community/whisper-large-v3-turbo/resolve/main && \
     for f in config.json generation_config.json tokenizer.json tokenizer_config.json \
