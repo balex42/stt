@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="de">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Meeting Protocol Generator</title>
+<title>Meetingprotokoll-Generator</title>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -182,7 +182,7 @@
 <body>
 
 <header>
-  <h1>Meeting Protocol Generator</h1>
+  <h1>Meetingprotokoll-Generator</h1>
   <div class="model-select">
     <span>Gemma 4</span>
     <button class="seg active" data-model="E2B">E2B</button>
@@ -192,27 +192,27 @@
 
 <div class="card">
   <div class="tabs">
-    <button class="tab active" data-tab="upload">Upload File</button>
-    <button class="tab" data-tab="record">Live Record</button>
+    <button class="tab active" data-tab="upload">Datei hochladen</button>
+    <button class="tab" data-tab="record">Live-Aufnahme</button>
   </div>
 
   <div class="tab-panel active" id="tab-upload">
-    <label class="file-label" for="file-input">Choose audio or video file…</label>
+    <label class="file-label" for="file-input">Audio- oder Videodatei auswählen…</label>
     <input type="file" id="file-input" accept="audio/*,video/*">
-    <div id="file-name">No file selected</div>
-    <button class="btn btn-primary" id="upload-btn" disabled>Transcribe &amp; Summarise</button>
+    <div id="file-name">Keine Datei ausgewählt</div>
+    <button class="btn btn-primary" id="upload-btn" disabled>Transkribieren &amp; Zusammenfassen</button>
   </div>
 
   <div class="tab-panel" id="tab-record">
     <div class="record-row">
       <div class="dot" id="rec-dot"></div>
       <span id="record-timer"></span>
-      <button class="btn btn-primary" id="record-btn">Start Recording</button>
+      <button class="btn btn-primary" id="record-btn">Aufnahme starten</button>
     </div>
   </div>
 
   <div class="progress-wrap" id="progress-wrap">
-    <div class="progress-label" id="progress-label">Loading model…</div>
+    <div class="progress-label" id="progress-label">Modell wird geladen…</div>
     <div class="progress-bar-bg"><div class="progress-bar" id="progress-bar"></div></div>
   </div>
   <div id="status"></div>
@@ -221,17 +221,17 @@
 <div class="card" id="results">
   <div class="results-grid">
     <div class="result-box">
-      <h2>Raw Transcript</h2>
+      <h2>Rohtranskript</h2>
       <pre id="transcript-out"></pre>
     </div>
     <div class="result-box">
-      <h2>Meeting Protocol</h2>
+      <h2>Meetingprotokoll</h2>
       <pre class="streaming-pre" id="stream-out"></pre>
       <div class="protocol-content" id="protocol-out"></div>
     </div>
   </div>
   <div class="download-row">
-    <button class="btn btn-ghost" id="download-btn">Download .md</button>
+    <button class="btn btn-ghost" id="download-btn">Herunterladen (.md)</button>
   </div>
 </div>
 
@@ -239,38 +239,53 @@
 // ---------------------------------------------------------------------------
 // Config — change model IDs here if needed
 // ---------------------------------------------------------------------------
-const WHISPER_MODEL = 'onnx-community/whisper-base';
+const WHISPER_MODEL = 'onnx-community/whisper-large-v3-turbo-german-ONNX';
 
 const GEMMA_MODELS = {
   E2B: 'https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it-web.litertlm',
   E4B: 'https://huggingface.co/litert-community/gemma-4-E4B-it-litert-lm/resolve/main/gemma-4-E4B-it-web.litertlm',
 };
 
-const SYSTEM_PROMPT = `You are a professional meeting secretary.
-Given a meeting transcript, produce a structured meeting protocol.
-Return ONLY valid JSON — no markdown fences, no explanation, no extra text.
-Use exactly this schema:
+const SYSTEM_PROMPT = `Du bist ein professioneller Meetingsekretär.
+Erstelle auf Basis des gegebenen Meetingtranskripts ein strukturiertes Meetingprotokoll auf Deutsch.
+Gib NUR gültiges JSON zurück — keine Markdown-Umrandungen, keine Erklärungen, keinen zusätzlichen Text.
+Verwende exakt dieses Schema:
 {
-  "summary": "2-4 sentence overview",
-  "key_decisions": ["decision string"],
-  "action_items": [{"task": "string", "owner": "string or null", "due": "string or null"}],
-  "key_topics": ["topic string"]
+  "zusammenfassung": "Überblick in 2-4 Sätzen",
+  "hauptentscheidungen": ["Entscheidung als Text"],
+  "aufgaben": [{"aufgabe": "Text", "verantwortlich": "Text oder null", "faellig": "Text oder null"}],
+  "hauptthemen": ["Thema als Text"]
 }
-If a field has no content use an empty list or null.`;
+Falls ein Feld keinen Inhalt hat, verwende eine leere Liste oder null.
+Schreibe alle Textwerte auf Deutsch.`;
+
+// ---------------------------------------------------------------------------
+// Browser compatibility check
+// ---------------------------------------------------------------------------
+const hasJSPI = typeof WebAssembly?.Suspending === 'function';
+if (!hasJSPI) {
+  document.getElementById('status').innerHTML =
+    '<strong style="color:#f87171">Gemma 4 erfordert Chrome 123 oder neuer.</strong> ' +
+    'Die Transkription (Whisper) funktioniert weiterhin, aber die Protokollerstellung ist in diesem Browser nicht verfügbar.';
+  document.getElementById('status').className = 'error';
+}
 
 // ---------------------------------------------------------------------------
 // Imports
 // ---------------------------------------------------------------------------
 const { pipeline } = await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@3/+esm');
-const { Engine }   = await import('https://cdn.jsdelivr.net/npm/@litert-lm/core/+esm');
+const { Engine }   = hasJSPI
+  ? await import('https://cdn.jsdelivr.net/npm/@litert-lm/core/+esm')
+  : { Engine: null };
 
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
-let asr         = null;
-let llmEngine   = null;
-let activeModel = 'E2B';
-let lastData    = null;
+let asr            = null;
+let llmEngine      = null;
+let modelObjectUrl = null;   // blob: URL for cached Gemma file; revoked on engine delete
+let activeModel    = 'E2B';
+let lastData       = null;
 
 // ---------------------------------------------------------------------------
 // Model selector
@@ -282,7 +297,11 @@ document.querySelectorAll('.seg').forEach(btn => {
     document.querySelectorAll('.seg').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
     activeModel = key;
-    if (llmEngine) { llmEngine.delete(); llmEngine = null; }
+    if (llmEngine) {
+      llmEngine.delete();
+      llmEngine = null;
+      if (modelObjectUrl) { URL.revokeObjectURL(modelObjectUrl); modelObjectUrl = null; }
+    }
   });
 });
 
@@ -307,7 +326,7 @@ const fileNameEl = document.getElementById('file-name');
 
 fileInput.addEventListener('change', () => {
   const f = fileInput.files[0];
-  fileNameEl.textContent = f ? f.name : 'No file selected';
+  fileNameEl.textContent = f ? f.name : 'Keine Datei ausgewählt';
   uploadBtn.disabled = !f;
 });
 
@@ -334,7 +353,7 @@ recordBtn.addEventListener('click', async () => {
     try {
       stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     } catch (e) {
-      setStatus('Microphone access denied: ' + e.message, 'error'); return;
+      setStatus('Mikrofonzugriff verweigert: ' + e.message, 'error'); return;
     }
     recordChunks = [];
     mediaRecorder = new MediaRecorder(stream);
@@ -349,20 +368,20 @@ recordBtn.addEventListener('click', async () => {
     elapsed = 0;
     timerEl.textContent = '0:00';
     recDot.classList.add('pulse');
-    recordBtn.textContent = 'Stop & Transcribe';
+    recordBtn.textContent = 'Stoppen & Transkribieren';
     recordBtn.classList.replace('btn-primary', 'btn-danger');
     timerInterval = setInterval(() => {
       elapsed++;
       const m = Math.floor(elapsed / 60), s = elapsed % 60;
       timerEl.textContent = `${m}:${s.toString().padStart(2,'0')}`;
     }, 1000);
-    setStatus('Recording…', 'info');
+    setStatus('Aufnahme läuft…', 'info');
   } else {
     clearInterval(timerInterval);
     recDot.classList.remove('pulse');
     timerEl.textContent = '';
     recordBtn.disabled = true;
-    recordBtn.textContent = 'Start Recording';
+    recordBtn.textContent = 'Aufnahme starten';
     recordBtn.classList.replace('btn-danger', 'btn-primary');
     mediaRecorder.stop();
   }
@@ -388,6 +407,50 @@ async function blobToFloat32(blob) {
 }
 
 // ---------------------------------------------------------------------------
+// OPFS-backed download with progress (used for large Gemma model files)
+// Falls back to direct URL if OPFS is unavailable.
+// ---------------------------------------------------------------------------
+async function fetchWithOPFSCache(url, onProgress) {
+  const filename = url.split('/').pop();
+  try {
+    const root = await navigator.storage.getDirectory();
+    const dir  = await root.getDirectoryHandle('gemma-cache', { create: true });
+
+    // A sibling .done marker file means the previous download completed fully.
+    try {
+      await dir.getFileHandle(filename + '.done');
+      const file = await (await dir.getFileHandle(filename)).getFile();
+      onProgress(100);
+      return URL.createObjectURL(file);
+    } catch { /* not cached or incomplete — fall through to download */ }
+
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const total    = +res.headers.get('Content-Length') || 0;
+    const reader   = res.body.getReader();
+    const writable = await (await dir.getFileHandle(filename, { create: true })).createWritable();
+    let received = 0;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      await writable.write(value);
+      received += value.length;
+      if (total) onProgress(received / total * 100);
+    }
+    await writable.close();
+
+    // Mark as complete so the next load skips re-downloading.
+    await (await dir.getFileHandle(filename + '.done', { create: true })).createWritable().then(w => w.close());
+
+    const file = await (await dir.getFileHandle(filename)).getFile();
+    return URL.createObjectURL(file);
+  } catch (e) {
+    console.warn('OPFS cache unavailable, using direct URL:', e.message);
+    return url;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Core processing pipeline
 // ---------------------------------------------------------------------------
 async function processBlob(blob) {
@@ -396,37 +459,54 @@ async function processBlob(blob) {
 
   try {
     // 1. Transcribe
-    setStatus('<span class="spinner"></span>Loading Whisper…', 'info');
+    setStatus('<span class="spinner"></span>Whisper wird geladen…', 'info');
     const audio = await blobToFloat32(blob);
 
     if (!asr) {
-      showProgress('Downloading Whisper model…');
+      showProgress('Whisper-Modell wird heruntergeladen (~560 MB, nur beim ersten Start)…');
       asr = await pipeline('automatic-speech-recognition', WHISPER_MODEL, {
         device: 'webgpu',
+        dtype: { encoder_model: 'q4f16', decoder_model_merged: 'q4f16' },
         progress_callback: p => updateProgress(p.progress ?? 0, p.file ?? ''),
       });
       hideProgress();
     }
 
-    setStatus('<span class="spinner"></span>Transcribing…', 'info');
-    const asrResult = await asr(audio, { return_timestamps: false });
-    const transcript = (asrResult.text ?? '').trim();
+    setStatus('<span class="spinner"></span>Transkription läuft… (lange Dateien können mehrere Minuten dauern)', 'info');
+    const asrResult    = await asr(audio, {
+      task: 'transcribe',
+      return_timestamps: true,   // required for chunk stitching
+      chunk_length_s: 30,
+      stride_length_s: 5,
+    });
+    const transcript   = (asrResult.text ?? '').trim();
+    const detectedLang = asrResult.language ?? null;
     document.getElementById('transcript-out').textContent = transcript || '(empty)';
     document.getElementById('results').style.display = 'block';
+    if (detectedLang) setStatus('Erkannte Sprache: ' + detectedLang, '');
 
     // 2. Generate protocol
-    setStatus('<span class="spinner"></span>Loading Gemma 4 ' + activeModel + '…', 'info');
+    setStatus('<span class="spinner"></span>Gemma 4 ' + activeModel + ' wird geladen…', 'info');
+
+    if (!Engine) {
+      throw new Error('Protokollerstellung erfordert Chrome 123+. Die Transkription war erfolgreich — siehe Rohtranskript oben.');
+    }
 
     if (!llmEngine) {
-      showProgress('Downloading Gemma 4 ' + activeModel + ' model…');
+      showProgress('Gemma 4 ' + activeModel + '-Modell wird heruntergeladen…');
+      const modelSrc = await fetchWithOPFSCache(
+        GEMMA_MODELS[activeModel],
+        pct => updateProgress(pct, 'Gemma 4 ' + activeModel + ' wird heruntergeladen…'),
+      );
       llmEngine = await Engine.create({
-        model: GEMMA_MODELS[activeModel],
+        model: modelSrc,
         mainExecutorSettings: { maxNumTokens: 8192 },
       });
+      if (modelSrc.startsWith('blob:')) modelObjectUrl = modelSrc;
       hideProgress();
     }
 
-    setStatus('<span class="spinner"></span>Generating protocol…', 'info');
+    setStatus('<span class="spinner"></span>Protokoll wird erstellt…', 'info');
     const conv = await llmEngine.createConversation({
       preface: { messages: [{ role: 'system', content: SYSTEM_PROMPT }] },
     });
@@ -437,7 +517,7 @@ async function processBlob(blob) {
     streamEl.textContent = '';
     let buffer = '';
 
-    for await (const chunk of conv.sendMessageStreaming(`Meeting transcript:\n\n${transcript}`)) {
+    for await (const chunk of conv.sendMessageStreaming(`Meetingtranskript:\n\n${transcript}`)) {
       for (const item of chunk.content) {
         if (item.type === 'text') {
           buffer += item.text;
@@ -454,10 +534,10 @@ async function processBlob(blob) {
     lastData = { transcript, protocol };
     renderProtocol(protocol);
     document.getElementById('results').scrollIntoView({ behavior: 'smooth', block: 'start' });
-    setStatus('Done.', '');
+    setStatus('Fertig.', '');
 
   } catch (e) {
-    setStatus('Error: ' + e.message, 'error');
+    setStatus('Fehler: ' + e.message, 'error');
     console.error(e);
   } finally {
     setAllBusy(false);
@@ -474,8 +554,8 @@ function parseProtocol(raw) {
   const m = cleaned.match(/\{[\s\S]*\}/);
   if (m) try { return JSON.parse(m[0]); } catch {}
   return {
-    summary: 'Could not parse protocol from model output.',
-    key_decisions: [], action_items: [], key_topics: [],
+    zusammenfassung: 'Protokoll konnte nicht aus der Modellausgabe geparst werden.',
+    hauptentscheidungen: [], aufgaben: [], hauptthemen: [],
     raw_output: raw,
   };
 }
@@ -488,26 +568,26 @@ function renderProtocol(p) {
   let html = '';
 
   if (p.raw_output) {
-    html += `<p style="color:#f87171;margin-bottom:.5rem">Failed to parse JSON — raw output shown below.</p>`;
+    html += `<p style="color:#f87171;margin-bottom:.5rem">JSON konnte nicht geparst werden — Rohausgabe unten.</p>`;
     html += `<pre style="font-size:.78rem;color:#94a3b8;white-space:pre-wrap">${esc(p.raw_output)}</pre>`;
   } else {
-    html += '<h3>Summary</h3><p>' + esc(p.summary || '—') + '</p>';
+    html += '<h3>Zusammenfassung</h3><p>' + esc(p.zusammenfassung || '—') + '</p>';
 
-    if ((p.key_decisions || []).length) {
-      html += '<h3>Key Decisions</h3><ul>';
-      p.key_decisions.forEach(d => { html += `<li>${esc(d)}</li>`; });
+    if ((p.hauptentscheidungen || []).length) {
+      html += '<h3>Hauptentscheidungen</h3><ul>';
+      p.hauptentscheidungen.forEach(d => { html += `<li>${esc(d)}</li>`; });
       html += '</ul>';
     }
-    if ((p.action_items || []).length) {
-      html += '<h3>Action Items</h3><table><thead><tr><th>Task</th><th>Owner</th><th>Due</th></tr></thead><tbody>';
-      p.action_items.forEach(a => {
-        html += `<tr><td>${esc(a.task)}</td><td>${esc(a.owner??'—')}</td><td>${esc(a.due??'—')}</td></tr>`;
+    if ((p.aufgaben || []).length) {
+      html += '<h3>Aufgaben</h3><table><thead><tr><th>Aufgabe</th><th>Verantwortlich</th><th>Fällig</th></tr></thead><tbody>';
+      p.aufgaben.forEach(a => {
+        html += `<tr><td>${esc(a.aufgabe)}</td><td>${esc(a.verantwortlich??'—')}</td><td>${esc(a.faellig??'—')}</td></tr>`;
       });
       html += '</tbody></table>';
     }
-    if ((p.key_topics || []).length) {
-      html += '<h3>Key Topics</h3><ul>';
-      p.key_topics.forEach(t => { html += `<li>${esc(t)}</li>`; });
+    if ((p.hauptthemen || []).length) {
+      html += '<h3>Hauptthemen</h3><ul>';
+      p.hauptthemen.forEach(t => { html += `<li>${esc(t)}</li>`; });
       html += '</ul>';
     }
   }
@@ -521,26 +601,26 @@ document.getElementById('download-btn').addEventListener('click', () => {
   if (!lastData) return;
   const { transcript, protocol: p } = lastData;
   const now = new Date().toISOString().slice(0, 10);
-  let md = `# Meeting Protocol\n_Generated: ${now}_\n\n`;
-  md += `## Summary\n${p.summary || '—'}\n\n`;
-  if ((p.key_decisions || []).length) {
-    md += `## Key Decisions\n` + p.key_decisions.map(d => `- ${d}`).join('\n') + '\n\n';
+  let md = `# Meetingprotokoll\n_Erstellt: ${now}_\n\n`;
+  md += `## Zusammenfassung\n${p.zusammenfassung || '—'}\n\n`;
+  if ((p.hauptentscheidungen || []).length) {
+    md += `## Hauptentscheidungen\n` + p.hauptentscheidungen.map(d => `- ${d}`).join('\n') + '\n\n';
   }
-  if ((p.action_items || []).length) {
-    md += `## Action Items\n| Task | Owner | Due |\n|------|-------|-----|\n`;
-    p.action_items.forEach(a => { md += `| ${a.task||''} | ${a.owner||'—'} | ${a.due||'—'} |\n`; });
+  if ((p.aufgaben || []).length) {
+    md += `## Aufgaben\n| Aufgabe | Verantwortlich | Fällig |\n|---------|----------------|--------|\n`;
+    p.aufgaben.forEach(a => { md += `| ${a.aufgabe||''} | ${a.verantwortlich||'—'} | ${a.faellig||'—'} |\n`; });
     md += '\n';
   }
-  if ((p.key_topics || []).length) {
-    md += `## Key Topics\n` + p.key_topics.map(t => `- ${t}`).join('\n') + '\n\n';
+  if ((p.hauptthemen || []).length) {
+    md += `## Hauptthemen\n` + p.hauptthemen.map(t => `- ${t}`).join('\n') + '\n\n';
   }
-  md += `---\n## Raw Transcript\n${transcript}\n`;
+  md += `---\n## Rohtranskript\n${transcript}\n`;
 
   const blob = new Blob([md], { type: 'text/markdown' });
   const url  = URL.createObjectURL(blob);
   const a    = document.createElement('a');
   a.href = url;
-  a.download = `protocol_${new Date().toISOString().slice(0,16).replace('T','_')}.md`;
+  a.download = `protokoll_${new Date().toISOString().slice(0,16).replace('T','_')}.md`;
   a.click();
   URL.revokeObjectURL(url);
 });
