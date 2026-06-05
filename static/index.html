@@ -27,31 +27,6 @@
 
   header h1 { font-size: 1.4rem; font-weight: 600; color: #f8fafc; }
 
-  .model-select {
-    display: flex;
-    align-items: center;
-    gap: 0.4rem;
-    background: #1e2130;
-    border: 1px solid #2d3348;
-    border-radius: 8px;
-    padding: 0.3rem 0.5rem;
-    font-size: 0.85rem;
-    color: #64748b;
-  }
-  .seg {
-    padding: 0.25rem 0.7rem;
-    border-radius: 5px;
-    border: none;
-    background: transparent;
-    color: #94a3b8;
-    cursor: pointer;
-    font-size: 0.85rem;
-    font-weight: 500;
-    transition: all 0.15s;
-  }
-  .seg.active { background: #3b82f6; color: #fff; }
-  .seg:not(.active):hover { background: #2d3348; color: #e2e8f0; }
-
   .card {
     background: #1e2130;
     border: 1px solid #2d3348;
@@ -183,11 +158,6 @@
 
 <header>
   <h1>Meetingprotokoll-Generator</h1>
-  <div class="model-select">
-    <span>Gemma 4</span>
-    <button class="seg active" data-model="E2B">E2B</button>
-    <button class="seg" data-model="E4B">E4B</button>
-  </div>
 </header>
 
 <div class="card">
@@ -241,10 +211,7 @@
 // ---------------------------------------------------------------------------
 const WHISPER_MODEL = 'onnx-community/whisper-large-v3-turbo';
 
-const GEMMA_MODELS = {
-  E2B: 'https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it-web.litertlm',
-  E4B: 'https://huggingface.co/litert-community/gemma-4-E4B-it-litert-lm/resolve/main/gemma-4-E4B-it-web.litertlm',
-};
+const GEMMA_MODEL = '/models/gemma/gemma-4-E2B-it-web.litertlm';
 
 const SYSTEM_PROMPT = `Du bist ein professioneller Meetingsekretär.
 Erstelle auf Basis des gegebenen Meetingtranskripts ein strukturiertes Meetingprotokoll auf Deutsch.
@@ -263,13 +230,15 @@ Schreibe alle Textwerte auf Deutsch.`;
 // Whisper Web Worker source (runs inference off the main thread)
 // ---------------------------------------------------------------------------
 const WHISPER_WORKER_SRC = `
-import { pipeline, WhisperTextStreamer } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3/+esm';
+import { pipeline, WhisperTextStreamer, env } from '/vendor/transformers.js';
 
 let asr = null;
 
 self.addEventListener('message', async ({ data: msg }) => {
   if (msg.type === 'load') {
     try {
+      env.backends.onnx.wasm.wasmPaths = msg.baseUrl + '/vendor/ort/';
+      env.remoteHost = msg.baseUrl + '/models';
       asr = await pipeline('automatic-speech-recognition', msg.model, {
         device: 'webgpu',
         dtype: { encoder_model: 'fp16', decoder_model_merged: 'q4' },
@@ -321,37 +290,19 @@ if (!hasJSPI) {
 // ---------------------------------------------------------------------------
 // Imports
 // ---------------------------------------------------------------------------
-const { Engine } = hasJSPI
-  ? await import('https://cdn.jsdelivr.net/npm/@litert-lm/core/+esm')
-  : { Engine: null };
+const { Engine, loadLiteRtLm } = hasJSPI
+  ? await import('/vendor/litert-lm.js')
+  : { Engine: null, loadLiteRtLm: null };
 
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
-let asrWorker      = null;   // blob-URL Web Worker running Whisper
-let asrReady       = false;  // true once the model is loaded in the worker
-let llmEngine      = null;
-let modelObjectUrl = null;   // blob: URL for cached Gemma file; revoked on engine delete
-let activeModel    = 'E2B';
-let lastData       = null;
-
-// ---------------------------------------------------------------------------
-// Model selector
-// ---------------------------------------------------------------------------
-document.querySelectorAll('.seg').forEach(btn => {
-  btn.addEventListener('click', () => {
-    const key = btn.dataset.model;
-    if (key === activeModel) return;
-    document.querySelectorAll('.seg').forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
-    activeModel = key;
-    if (llmEngine) {
-      llmEngine.delete();
-      llmEngine = null;
-      if (modelObjectUrl) { URL.revokeObjectURL(modelObjectUrl); modelObjectUrl = null; }
-    }
-  });
-});
+let asrWorker         = null;
+let asrReady          = false;
+let llmEngine         = null;
+let modelObjectUrl    = null;
+let litrtLmLoadPromise = null;
+let lastData          = null;
 
 // ---------------------------------------------------------------------------
 // Tab switching
@@ -578,7 +529,7 @@ async function processBlob(blob) {
 
     if (!asrReady) {
       showProgress('Whisper-Modell wird heruntergeladen…');
-      await workerRun('load', { model: WHISPER_MODEL });
+      await workerRun('load', { model: WHISPER_MODEL, baseUrl: window.location.origin });
       asrReady = true;
       hideProgress();
     }
@@ -597,17 +548,22 @@ async function processBlob(blob) {
     document.getElementById('results').style.display = 'block';
 
     // 2. Generate protocol
-    setStatus('<span class="spinner"></span>Gemma 4 ' + activeModel + ' wird geladen…', 'info');
+    setStatus('<span class="spinner"></span>Gemma 4 E2B wird geladen…', 'info');
 
     if (!Engine) {
       throw new Error('Protokollerstellung erfordert Chrome 123+. Die Transkription war erfolgreich — siehe Rohtranskript oben.');
     }
 
     if (!llmEngine) {
-      showProgress('Gemma 4 ' + activeModel + '-Modell wird heruntergeladen…');
+      if (loadLiteRtLm && !litrtLmLoadPromise) {
+        litrtLmLoadPromise = loadLiteRtLm('/vendor/litert-lm-wasm/');
+      }
+      await litrtLmLoadPromise;
+
+      showProgress('Gemma 4 E2B-Modell wird geladen…');
       const modelSrc = await fetchWithOPFSCache(
-        GEMMA_MODELS[activeModel],
-        pct => updateProgress(pct, 'Gemma 4 ' + activeModel + ' wird heruntergeladen…'),
+        GEMMA_MODEL,
+        pct => updateProgress(pct, 'Gemma 4 E2B wird geladen…'),
       );
       llmEngine = await Engine.create({
         model: modelSrc,
