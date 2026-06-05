@@ -239,7 +239,7 @@
 // ---------------------------------------------------------------------------
 // Config — change model IDs here if needed
 // ---------------------------------------------------------------------------
-const WHISPER_MODEL = 'onnx-community/whisper-large-v3-turbo-german-ONNX';
+const WHISPER_MODEL = 'onnx-community/whisper-large-v3-turbo';
 
 const GEMMA_MODELS = {
   E2B: 'https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it-web.litertlm',
@@ -260,6 +260,54 @@ Falls ein Feld keinen Inhalt hat, verwende eine leere Liste oder null.
 Schreibe alle Textwerte auf Deutsch.`;
 
 // ---------------------------------------------------------------------------
+// Whisper Web Worker source (runs inference off the main thread)
+// ---------------------------------------------------------------------------
+const WHISPER_WORKER_SRC = `
+import { pipeline, WhisperTextStreamer } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3/+esm';
+
+let asr = null;
+
+self.addEventListener('message', async ({ data: msg }) => {
+  if (msg.type === 'load') {
+    try {
+      asr = await pipeline('automatic-speech-recognition', msg.model, {
+        device: 'webgpu',
+        dtype: { encoder_model: 'fp16', decoder_model_merged: 'q4' },
+        progress_callback: p => self.postMessage({ type: 'progress', data: p }),
+      });
+      self.postMessage({ type: 'ready' });
+    } catch (e) { self.postMessage({ type: 'error', message: e.message }); }
+    return;
+  }
+
+  if (msg.type === 'transcribe') {
+    try {
+      let accumulated = '';
+      const streamer = new WhisperTextStreamer(asr.tokenizer, {
+        skip_prompt: true,
+        callback_function: text => {
+          accumulated += text;
+          self.postMessage({ type: 'partial', text: accumulated });
+        },
+        on_chunk_start: t => self.postMessage({ type: 'chunk', timestamp: t }),
+      });
+
+      const result = await asr(new Float32Array(msg.audio), {
+        task: 'transcribe',
+        language: 'german',
+        return_timestamps: true,
+        chunk_length_s: 30,
+        stride_length_s: 5,
+        num_beams: 1,
+        streamer,
+      });
+      self.postMessage({ type: 'complete', text: result.text ?? accumulated });
+    } catch (e) { self.postMessage({ type: 'error', message: e.message }); }
+  }
+});
+`;
+
+// ---------------------------------------------------------------------------
 // Browser compatibility check
 // ---------------------------------------------------------------------------
 const hasJSPI = typeof WebAssembly?.Suspending === 'function';
@@ -273,15 +321,15 @@ if (!hasJSPI) {
 // ---------------------------------------------------------------------------
 // Imports
 // ---------------------------------------------------------------------------
-const { pipeline } = await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@3/+esm');
-const { Engine }   = hasJSPI
+const { Engine } = hasJSPI
   ? await import('https://cdn.jsdelivr.net/npm/@litert-lm/core/+esm')
   : { Engine: null };
 
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
-let asr            = null;
+let asrWorker      = null;   // blob-URL Web Worker running Whisper
+let asrReady       = false;  // true once the model is loaded in the worker
 let llmEngine      = null;
 let modelObjectUrl = null;   // blob: URL for cached Gemma file; revoked on engine delete
 let activeModel    = 'E2B';
@@ -451,6 +499,72 @@ async function fetchWithOPFSCache(url, onProgress) {
 }
 
 // ---------------------------------------------------------------------------
+// ASR worker helpers
+// ---------------------------------------------------------------------------
+function getAsrWorker() {
+  if (!asrWorker) {
+    const blob = new Blob([WHISPER_WORKER_SRC], { type: 'text/javascript' });
+    asrWorker = new Worker(URL.createObjectURL(blob), { type: 'module' });
+  }
+  return asrWorker;
+}
+
+// Effective step = chunk_length_s (30) − 2 × stride_length_s (5) = 20 s
+const WHISPER_WINDOW_STEP_S = 20;
+const fmtTime = s => Math.floor(s / 60) + ':' + Math.floor(s % 60).toString().padStart(2, '0');
+
+function workerRun(type, payload, transfer = []) {
+  return new Promise((resolve, reject) => {
+    const w = getAsrWorker();
+    // Pull totalDuration out so the worker doesn't see it; track running offset locally.
+    const { totalDuration, ...workerPayload } = payload;
+    let windowOffsetS = 0;
+    let lastChunkTs   = -Infinity;
+
+    const handler = ({ data }) => {
+      switch (data.type) {
+        case 'progress':
+          updateProgress(data.data.progress ?? 0, data.data.file ?? '');
+          break;
+        case 'partial': {
+          const out = document.getElementById('transcript-out');
+          out.textContent = data.text;
+          out.scrollTop = out.scrollHeight;
+          document.getElementById('results').style.display = 'block';
+          break;
+        }
+        case 'chunk':
+          // Streamer timestamps are relative to the current 30 s window.
+          // A significant backward jump signals a new audio window: bump the offset.
+          if (Number.isFinite(data.timestamp)) {
+            if (data.timestamp + 1 < lastChunkTs) windowOffsetS += WHISPER_WINDOW_STEP_S;
+            lastChunkTs = data.timestamp;
+            const cur = totalDuration
+              ? Math.min(windowOffsetS + data.timestamp, totalDuration)
+              : windowOffsetS + data.timestamp;
+            const label = totalDuration
+              ? 'Transkription ' + fmtTime(cur) + ' / ' + fmtTime(totalDuration)
+              : 'Transkription bei ' + fmtTime(cur);
+            setStatus('<span class="spinner"></span>' + label + '…', 'info');
+          }
+          break;
+        case 'ready':
+        case 'complete':
+          w.removeEventListener('message', handler);
+          resolve(data);
+          break;
+        case 'error':
+          w.removeEventListener('message', handler);
+          reject(new Error(data.message));
+          break;
+      }
+    };
+    w.addEventListener('message', handler);
+    w.postMessage({ type, ...workerPayload }, transfer);
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Core processing pipeline
 // ---------------------------------------------------------------------------
 async function processBlob(blob) {
@@ -459,31 +573,28 @@ async function processBlob(blob) {
 
   try {
     // 1. Transcribe
-    setStatus('<span class="spinner"></span>Whisper wird geladen…', 'info');
+    setStatus('<span class="spinner"></span>Audio wird verarbeitet…', 'info');
     const audio = await blobToFloat32(blob);
 
-    if (!asr) {
-      showProgress('Whisper-Modell wird heruntergeladen (~560 MB, nur beim ersten Start)…');
-      asr = await pipeline('automatic-speech-recognition', WHISPER_MODEL, {
-        device: 'webgpu',
-        dtype: { encoder_model: 'q4f16', decoder_model_merged: 'q4f16' },
-        progress_callback: p => updateProgress(p.progress ?? 0, p.file ?? ''),
-      });
+    if (!asrReady) {
+      showProgress('Whisper-Modell wird heruntergeladen…');
+      await workerRun('load', { model: WHISPER_MODEL });
+      asrReady = true;
       hideProgress();
     }
 
-    setStatus('<span class="spinner"></span>Transkription läuft… (lange Dateien können mehrere Minuten dauern)', 'info');
-    const asrResult    = await asr(audio, {
-      task: 'transcribe',
-      return_timestamps: true,   // required for chunk stitching
-      chunk_length_s: 30,
-      stride_length_s: 5,
-    });
-    const transcript   = (asrResult.text ?? '').trim();
-    const detectedLang = asrResult.language ?? null;
-    document.getElementById('transcript-out').textContent = transcript || '(empty)';
+    const totalDuration = audio.length / 16000;
+    setStatus('<span class="spinner"></span>Transkription läuft… (' + fmtTime(totalDuration) + ' insgesamt)', 'info');
+    // Transfer the audio buffer to the worker (zero-copy)
+    const asrResult  = await workerRun(
+      'transcribe',
+      { audio: audio.buffer, totalDuration },
+      [audio.buffer],
+    );
+    const transcript = (asrResult.text ?? '').trim();
+    // Overwrite partial chunks with the final clean result
+    document.getElementById('transcript-out').textContent = transcript || '(leer)';
     document.getElementById('results').style.display = 'block';
-    if (detectedLang) setStatus('Erkannte Sprache: ' + detectedLang, '');
 
     // 2. Generate protocol
     setStatus('<span class="spinner"></span>Gemma 4 ' + activeModel + ' wird geladen…', 'info');
