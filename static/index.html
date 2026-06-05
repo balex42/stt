@@ -1,0 +1,586 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Meeting Protocol Generator</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    background: #0f1117;
+    color: #e2e8f0;
+    min-height: 100vh;
+    padding: 2rem 1rem;
+  }
+
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    max-width: 960px;
+    margin: 0 auto 1.5rem;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+  }
+
+  header h1 { font-size: 1.4rem; font-weight: 600; color: #f8fafc; }
+
+  .model-select {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    background: #1e2130;
+    border: 1px solid #2d3348;
+    border-radius: 8px;
+    padding: 0.3rem 0.5rem;
+    font-size: 0.85rem;
+    color: #64748b;
+  }
+  .seg {
+    padding: 0.25rem 0.7rem;
+    border-radius: 5px;
+    border: none;
+    background: transparent;
+    color: #94a3b8;
+    cursor: pointer;
+    font-size: 0.85rem;
+    font-weight: 500;
+    transition: all 0.15s;
+  }
+  .seg.active { background: #3b82f6; color: #fff; }
+  .seg:not(.active):hover { background: #2d3348; color: #e2e8f0; }
+
+  .card {
+    background: #1e2130;
+    border: 1px solid #2d3348;
+    border-radius: 12px;
+    padding: 1.5rem;
+    max-width: 960px;
+    margin: 0 auto 1.5rem;
+  }
+
+  .tabs { display: flex; gap: 0.5rem; margin-bottom: 1.25rem; }
+  .tab {
+    padding: 0.5rem 1.25rem;
+    border-radius: 8px;
+    border: 1px solid #2d3348;
+    background: transparent;
+    color: #94a3b8;
+    cursor: pointer;
+    font-size: 0.95rem;
+    transition: all 0.15s;
+  }
+  .tab.active { background: #3b82f6; border-color: #3b82f6; color: #fff; }
+  .tab-panel { display: none; }
+  .tab-panel.active { display: block; }
+
+  #file-input { display: none; }
+  .file-label {
+    display: block;
+    padding: 0.6rem 1rem;
+    border: 1px dashed #4b5563;
+    border-radius: 8px;
+    cursor: pointer;
+    color: #94a3b8;
+    font-size: 0.9rem;
+    text-align: center;
+    transition: border-color 0.15s;
+    margin-bottom: 0.5rem;
+  }
+  .file-label:hover { border-color: #3b82f6; color: #e2e8f0; }
+  #file-name { font-size: 0.85rem; color: #64748b; margin-bottom: 0.75rem; }
+
+  .record-row { display: flex; align-items: center; gap: 1rem; }
+  .dot { width: 12px; height: 12px; border-radius: 50%; background: #ef4444; display: none; }
+  .dot.pulse { display: block; animation: pulse 1.2s ease-in-out infinite; }
+  @keyframes pulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:.4;transform:scale(.75)} }
+  #record-timer { font-size: 0.9rem; color: #94a3b8; font-variant-numeric: tabular-nums; }
+
+  .btn {
+    padding: 0.5rem 1.25rem; border-radius: 8px; border: none;
+    cursor: pointer; font-size: 0.95rem; font-weight: 500; transition: opacity .15s, background .15s;
+  }
+  .btn:disabled { opacity: .45; cursor: not-allowed; }
+  .btn-primary { background: #3b82f6; color: #fff; }
+  .btn-primary:not(:disabled):hover { background: #2563eb; }
+  .btn-danger  { background: #ef4444; color: #fff; }
+  .btn-danger:not(:disabled):hover  { background: #dc2626; }
+  .btn-ghost   { background: #2d3348; color: #e2e8f0; }
+  .btn-ghost:not(:disabled):hover   { background: #374151; }
+
+  .progress-wrap {
+    margin-top: 1rem;
+    display: none;
+  }
+  .progress-label { font-size: 0.82rem; color: #64748b; margin-bottom: 0.3rem; }
+  .progress-bar-bg {
+    background: #2d3348; border-radius: 4px; height: 6px; overflow: hidden;
+  }
+  .progress-bar { height: 100%; background: #3b82f6; width: 0%; transition: width 0.2s; border-radius: 4px; }
+
+  #status {
+    margin-top: 0.75rem; font-size: 0.88rem; color: #64748b; min-height: 1.2em;
+  }
+  #status.error { color: #f87171; }
+  #status.info  { color: #60a5fa; }
+
+  .spinner {
+    display: inline-block; width: 13px; height: 13px;
+    border: 2px solid #3b82f680; border-top-color: #3b82f6;
+    border-radius: 50%; animation: spin .8s linear infinite;
+    vertical-align: middle; margin-right: 0.35rem;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  #results { display: none; }
+  .results-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+  @media (max-width: 640px) { .results-grid { grid-template-columns: 1fr; } }
+
+  .result-box h2 {
+    font-size: 0.8rem; text-transform: uppercase; letter-spacing: .08em;
+    color: #64748b; margin-bottom: 0.6rem;
+  }
+  .result-box pre {
+    background: #0f1117; border: 1px solid #2d3348; border-radius: 8px;
+    padding: 0.9rem; font-size: 0.82rem; line-height: 1.6;
+    overflow-y: auto; max-height: 400px; white-space: pre-wrap;
+    word-break: break-word; color: #cbd5e1;
+  }
+  .protocol-content {
+    background: #0f1117; border: 1px solid #2d3348; border-radius: 8px;
+    padding: 0.9rem; font-size: 0.88rem; line-height: 1.7;
+    overflow-y: auto; max-height: 400px;
+  }
+  .protocol-content h3 {
+    font-size: 0.75rem; text-transform: uppercase; letter-spacing: .07em;
+    color: #60a5fa; margin: 0.9rem 0 0.4rem;
+  }
+  .protocol-content h3:first-child { margin-top: 0; }
+  .protocol-content ul { padding-left: 1.1rem; color: #cbd5e1; }
+  .protocol-content li { margin-bottom: .25rem; }
+  .protocol-content p { color: #cbd5e1; }
+  .protocol-content table { width: 100%; border-collapse: collapse; font-size: .82rem; color: #cbd5e1; }
+  .protocol-content th {
+    text-align: left; padding: .35rem .6rem; border-bottom: 1px solid #2d3348;
+    color: #94a3b8; font-weight: 500;
+  }
+  .protocol-content td { padding: .35rem .6rem; border-bottom: 1px solid #1e2130; }
+
+  .streaming-pre {
+    background: #0f1117; border: 1px solid #2d3348; border-radius: 8px;
+    padding: 0.9rem; font-size: 0.82rem; line-height: 1.6;
+    overflow-y: auto; max-height: 400px; white-space: pre-wrap;
+    word-break: break-word; color: #94a3b8; font-style: italic;
+    display: none;
+  }
+
+  .download-row { margin-top: 1rem; display: flex; justify-content: flex-end; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Meeting Protocol Generator</h1>
+  <div class="model-select">
+    <span>Gemma 4</span>
+    <button class="seg active" data-model="E2B">E2B</button>
+    <button class="seg" data-model="E4B">E4B</button>
+  </div>
+</header>
+
+<div class="card">
+  <div class="tabs">
+    <button class="tab active" data-tab="upload">Upload File</button>
+    <button class="tab" data-tab="record">Live Record</button>
+  </div>
+
+  <div class="tab-panel active" id="tab-upload">
+    <label class="file-label" for="file-input">Choose audio or video file…</label>
+    <input type="file" id="file-input" accept="audio/*,video/*">
+    <div id="file-name">No file selected</div>
+    <button class="btn btn-primary" id="upload-btn" disabled>Transcribe &amp; Summarise</button>
+  </div>
+
+  <div class="tab-panel" id="tab-record">
+    <div class="record-row">
+      <div class="dot" id="rec-dot"></div>
+      <span id="record-timer"></span>
+      <button class="btn btn-primary" id="record-btn">Start Recording</button>
+    </div>
+  </div>
+
+  <div class="progress-wrap" id="progress-wrap">
+    <div class="progress-label" id="progress-label">Loading model…</div>
+    <div class="progress-bar-bg"><div class="progress-bar" id="progress-bar"></div></div>
+  </div>
+  <div id="status"></div>
+</div>
+
+<div class="card" id="results">
+  <div class="results-grid">
+    <div class="result-box">
+      <h2>Raw Transcript</h2>
+      <pre id="transcript-out"></pre>
+    </div>
+    <div class="result-box">
+      <h2>Meeting Protocol</h2>
+      <pre class="streaming-pre" id="stream-out"></pre>
+      <div class="protocol-content" id="protocol-out"></div>
+    </div>
+  </div>
+  <div class="download-row">
+    <button class="btn btn-ghost" id="download-btn">Download .md</button>
+  </div>
+</div>
+
+<script type="module">
+// ---------------------------------------------------------------------------
+// Config — change model IDs here if needed
+// ---------------------------------------------------------------------------
+const WHISPER_MODEL = 'onnx-community/whisper-base';
+
+const GEMMA_MODELS = {
+  E2B: 'https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it-web.litertlm',
+  E4B: 'https://huggingface.co/litert-community/gemma-4-E4B-it-litert-lm/resolve/main/gemma-4-E4B-it-web.litertlm',
+};
+
+const SYSTEM_PROMPT = `You are a professional meeting secretary.
+Given a meeting transcript, produce a structured meeting protocol.
+Return ONLY valid JSON — no markdown fences, no explanation, no extra text.
+Use exactly this schema:
+{
+  "summary": "2-4 sentence overview",
+  "key_decisions": ["decision string"],
+  "action_items": [{"task": "string", "owner": "string or null", "due": "string or null"}],
+  "key_topics": ["topic string"]
+}
+If a field has no content use an empty list or null.`;
+
+// ---------------------------------------------------------------------------
+// Imports
+// ---------------------------------------------------------------------------
+const { pipeline } = await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@3/+esm');
+const { Engine }   = await import('https://cdn.jsdelivr.net/npm/@litert-lm/core/+esm');
+
+// ---------------------------------------------------------------------------
+// State
+// ---------------------------------------------------------------------------
+let asr         = null;
+let llmEngine   = null;
+let activeModel = 'E2B';
+let lastData    = null;
+
+// ---------------------------------------------------------------------------
+// Model selector
+// ---------------------------------------------------------------------------
+document.querySelectorAll('.seg').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const key = btn.dataset.model;
+    if (key === activeModel) return;
+    document.querySelectorAll('.seg').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    activeModel = key;
+    if (llmEngine) { llmEngine.delete(); llmEngine = null; }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tab switching
+// ---------------------------------------------------------------------------
+document.querySelectorAll('.tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+    tab.classList.add('active');
+    document.getElementById('tab-' + tab.dataset.tab).classList.add('active');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Upload tab
+// ---------------------------------------------------------------------------
+const fileInput  = document.getElementById('file-input');
+const uploadBtn  = document.getElementById('upload-btn');
+const fileNameEl = document.getElementById('file-name');
+
+fileInput.addEventListener('change', () => {
+  const f = fileInput.files[0];
+  fileNameEl.textContent = f ? f.name : 'No file selected';
+  uploadBtn.disabled = !f;
+});
+
+uploadBtn.addEventListener('click', () => {
+  const f = fileInput.files[0];
+  if (f) processBlob(f);
+});
+
+// ---------------------------------------------------------------------------
+// Live record tab
+// ---------------------------------------------------------------------------
+const recordBtn  = document.getElementById('record-btn');
+const recDot     = document.getElementById('rec-dot');
+const timerEl    = document.getElementById('record-timer');
+
+let mediaRecorder = null;
+let recordChunks  = [];
+let timerInterval = null;
+let elapsed = 0;
+
+recordBtn.addEventListener('click', async () => {
+  if (!mediaRecorder || mediaRecorder.state === 'inactive') {
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (e) {
+      setStatus('Microphone access denied: ' + e.message, 'error'); return;
+    }
+    recordChunks = [];
+    mediaRecorder = new MediaRecorder(stream);
+    mediaRecorder.ondataavailable = e => { if (e.data.size) recordChunks.push(e.data); };
+    mediaRecorder.onstop = () => {
+      stream.getTracks().forEach(t => t.stop());
+      const mime = mediaRecorder.mimeType || 'audio/webm';
+      const blob = new Blob(recordChunks, { type: mime });
+      processBlob(blob);
+    };
+    mediaRecorder.start();
+    elapsed = 0;
+    timerEl.textContent = '0:00';
+    recDot.classList.add('pulse');
+    recordBtn.textContent = 'Stop & Transcribe';
+    recordBtn.classList.replace('btn-primary', 'btn-danger');
+    timerInterval = setInterval(() => {
+      elapsed++;
+      const m = Math.floor(elapsed / 60), s = elapsed % 60;
+      timerEl.textContent = `${m}:${s.toString().padStart(2,'0')}`;
+    }, 1000);
+    setStatus('Recording…', 'info');
+  } else {
+    clearInterval(timerInterval);
+    recDot.classList.remove('pulse');
+    timerEl.textContent = '';
+    recordBtn.disabled = true;
+    recordBtn.textContent = 'Start Recording';
+    recordBtn.classList.replace('btn-danger', 'btn-primary');
+    mediaRecorder.stop();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Audio → Float32Array at 16 kHz (Whisper native rate)
+// ---------------------------------------------------------------------------
+async function blobToFloat32(blob) {
+  const arrayBuffer = await blob.arrayBuffer();
+  const audioCtx    = new AudioContext();
+  const decoded     = await audioCtx.decodeAudioData(arrayBuffer);
+  audioCtx.close();
+
+  const TARGET_SR = 16000;
+  const offlineCtx = new OfflineAudioContext(1, Math.ceil(decoded.duration * TARGET_SR), TARGET_SR);
+  const source     = offlineCtx.createBufferSource();
+  source.buffer    = decoded;
+  source.connect(offlineCtx.destination);
+  source.start();
+  const resampled = await offlineCtx.startRendering();
+  return resampled.getChannelData(0);
+}
+
+// ---------------------------------------------------------------------------
+// Core processing pipeline
+// ---------------------------------------------------------------------------
+async function processBlob(blob) {
+  setAllBusy(true);
+  resetResults();
+
+  try {
+    // 1. Transcribe
+    setStatus('<span class="spinner"></span>Loading Whisper…', 'info');
+    const audio = await blobToFloat32(blob);
+
+    if (!asr) {
+      showProgress('Downloading Whisper model…');
+      asr = await pipeline('automatic-speech-recognition', WHISPER_MODEL, {
+        device: 'webgpu',
+        progress_callback: p => updateProgress(p.progress ?? 0, p.file ?? ''),
+      });
+      hideProgress();
+    }
+
+    setStatus('<span class="spinner"></span>Transcribing…', 'info');
+    const asrResult = await asr(audio, { return_timestamps: false });
+    const transcript = (asrResult.text ?? '').trim();
+    document.getElementById('transcript-out').textContent = transcript || '(empty)';
+    document.getElementById('results').style.display = 'block';
+
+    // 2. Generate protocol
+    setStatus('<span class="spinner"></span>Loading Gemma 4 ' + activeModel + '…', 'info');
+
+    if (!llmEngine) {
+      showProgress('Downloading Gemma 4 ' + activeModel + ' model…');
+      llmEngine = await Engine.create({
+        model: GEMMA_MODELS[activeModel],
+        mainExecutorSettings: { maxNumTokens: 8192 },
+      });
+      hideProgress();
+    }
+
+    setStatus('<span class="spinner"></span>Generating protocol…', 'info');
+    const conv = await llmEngine.createConversation({
+      preface: { messages: [{ role: 'system', content: SYSTEM_PROMPT }] },
+    });
+
+    // Stream tokens into the raw stream box while accumulating
+    const streamEl = document.getElementById('stream-out');
+    streamEl.style.display = 'block';
+    streamEl.textContent = '';
+    let buffer = '';
+
+    for await (const chunk of conv.sendMessageStreaming(`Meeting transcript:\n\n${transcript}`)) {
+      for (const item of chunk.content) {
+        if (item.type === 'text') {
+          buffer += item.text;
+          streamEl.textContent = buffer;
+          streamEl.scrollTop = streamEl.scrollHeight;
+        }
+      }
+    }
+
+    streamEl.style.display = 'none';
+
+    // 3. Parse & render
+    const protocol = parseProtocol(buffer);
+    lastData = { transcript, protocol };
+    renderProtocol(protocol);
+    document.getElementById('results').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    setStatus('Done.', '');
+
+  } catch (e) {
+    setStatus('Error: ' + e.message, 'error');
+    console.error(e);
+  } finally {
+    setAllBusy(false);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// JSON parsing with fallback
+// ---------------------------------------------------------------------------
+function parseProtocol(raw) {
+  const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
+  try { return JSON.parse(cleaned); } catch {}
+  // Try to extract first { ... } block
+  const m = cleaned.match(/\{[\s\S]*\}/);
+  if (m) try { return JSON.parse(m[0]); } catch {}
+  return {
+    summary: 'Could not parse protocol from model output.',
+    key_decisions: [], action_items: [], key_topics: [],
+    raw_output: raw,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Render protocol HTML
+// ---------------------------------------------------------------------------
+function renderProtocol(p) {
+  const esc = s => String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  let html = '';
+
+  if (p.raw_output) {
+    html += `<p style="color:#f87171;margin-bottom:.5rem">Failed to parse JSON — raw output shown below.</p>`;
+    html += `<pre style="font-size:.78rem;color:#94a3b8;white-space:pre-wrap">${esc(p.raw_output)}</pre>`;
+  } else {
+    html += '<h3>Summary</h3><p>' + esc(p.summary || '—') + '</p>';
+
+    if ((p.key_decisions || []).length) {
+      html += '<h3>Key Decisions</h3><ul>';
+      p.key_decisions.forEach(d => { html += `<li>${esc(d)}</li>`; });
+      html += '</ul>';
+    }
+    if ((p.action_items || []).length) {
+      html += '<h3>Action Items</h3><table><thead><tr><th>Task</th><th>Owner</th><th>Due</th></tr></thead><tbody>';
+      p.action_items.forEach(a => {
+        html += `<tr><td>${esc(a.task)}</td><td>${esc(a.owner??'—')}</td><td>${esc(a.due??'—')}</td></tr>`;
+      });
+      html += '</tbody></table>';
+    }
+    if ((p.key_topics || []).length) {
+      html += '<h3>Key Topics</h3><ul>';
+      p.key_topics.forEach(t => { html += `<li>${esc(t)}</li>`; });
+      html += '</ul>';
+    }
+  }
+  document.getElementById('protocol-out').innerHTML = html;
+}
+
+// ---------------------------------------------------------------------------
+// Markdown download
+// ---------------------------------------------------------------------------
+document.getElementById('download-btn').addEventListener('click', () => {
+  if (!lastData) return;
+  const { transcript, protocol: p } = lastData;
+  const now = new Date().toISOString().slice(0, 10);
+  let md = `# Meeting Protocol\n_Generated: ${now}_\n\n`;
+  md += `## Summary\n${p.summary || '—'}\n\n`;
+  if ((p.key_decisions || []).length) {
+    md += `## Key Decisions\n` + p.key_decisions.map(d => `- ${d}`).join('\n') + '\n\n';
+  }
+  if ((p.action_items || []).length) {
+    md += `## Action Items\n| Task | Owner | Due |\n|------|-------|-----|\n`;
+    p.action_items.forEach(a => { md += `| ${a.task||''} | ${a.owner||'—'} | ${a.due||'—'} |\n`; });
+    md += '\n';
+  }
+  if ((p.key_topics || []).length) {
+    md += `## Key Topics\n` + p.key_topics.map(t => `- ${t}`).join('\n') + '\n\n';
+  }
+  md += `---\n## Raw Transcript\n${transcript}\n`;
+
+  const blob = new Blob([md], { type: 'text/markdown' });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href = url;
+  a.download = `protocol_${new Date().toISOString().slice(0,16).replace('T','_')}.md`;
+  a.click();
+  URL.revokeObjectURL(url);
+});
+
+// ---------------------------------------------------------------------------
+// UI helpers
+// ---------------------------------------------------------------------------
+function setStatus(html, type) {
+  const el = document.getElementById('status');
+  el.innerHTML = html;
+  el.className = type || '';
+}
+
+function showProgress(label) {
+  document.getElementById('progress-label').textContent = label;
+  document.getElementById('progress-bar').style.width = '0%';
+  document.getElementById('progress-wrap').style.display = 'block';
+}
+
+function updateProgress(pct, file) {
+  document.getElementById('progress-bar').style.width = Math.min(pct, 100) + '%';
+  if (file) document.getElementById('progress-label').textContent = file;
+}
+
+function hideProgress() {
+  document.getElementById('progress-wrap').style.display = 'none';
+}
+
+function resetResults() {
+  document.getElementById('transcript-out').textContent = '';
+  document.getElementById('protocol-out').innerHTML = '';
+  document.getElementById('stream-out').textContent = '';
+  document.getElementById('stream-out').style.display = 'none';
+  lastData = null;
+}
+
+function setAllBusy(busy) {
+  uploadBtn.disabled  = busy || !fileInput.files[0];
+  recordBtn.disabled  = busy;
+}
+</script>
+</body>
+</html>
