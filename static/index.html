@@ -89,7 +89,13 @@
     margin-top: 1rem;
     display: none;
   }
-  .progress-label { font-size: 0.82rem; color: #64748b; margin-bottom: 0.3rem; }
+  .progress-label { font-size: 0.82rem; color: #64748b; margin-bottom: 0.5rem; }
+  #progress-list { display: flex; flex-direction: column; gap: 0.5rem; }
+  .progress-row-header {
+    display: flex; justify-content: space-between;
+    font-size: 0.78rem; color: #64748b; margin-bottom: 0.25rem;
+  }
+  .progress-row-pct { color: #94a3b8; font-variant-numeric: tabular-nums; }
   .progress-bar-bg {
     background: #2d3348; border-radius: 4px; height: 6px; overflow: hidden;
   }
@@ -194,7 +200,7 @@
 
   <div class="progress-wrap" id="progress-wrap">
     <div class="progress-label" id="progress-label">Modell wird geladen…</div>
-    <div class="progress-bar-bg"><div class="progress-bar" id="progress-bar"></div></div>
+    <div id="progress-list"></div>
   </div>
   <div id="status"></div>
 </div>
@@ -506,7 +512,7 @@ function workerRun(type, payload, transfer = []) {
     const handler = ({ data }) => {
       switch (data.type) {
         case 'progress':
-          updateProgress(data.data.progress ?? 0, data.data.file ?? '');
+          updateProgress(data.data.progress ?? 0, data.data.file ?? '', data.data.status);
           break;
         case 'partial': {
           const out = document.getElementById('transcript-out');
@@ -594,7 +600,7 @@ async function processBlob(blob) {
       showProgress('Gemma 4 E2B-Modell wird geladen…');
       const modelSrc = await fetchWithOPFSCache(
         GEMMA_MODEL,
-        pct => updateProgress(pct, 'Gemma 4 E2B wird geladen…'),
+        pct => updateProgress(pct, GEMMA_MODEL.split('/').pop()),
       );
       llmEngine = await Engine.create({
         model: modelSrc,
@@ -732,15 +738,35 @@ function setStatus(html, type) {
   el.className = type || '';
 }
 
+const _progressRows = new Map(); // file key → { bar, pctEl }
+
 function showProgress(label) {
   document.getElementById('progress-label').textContent = label;
-  document.getElementById('progress-bar').style.width = '0%';
+  document.getElementById('progress-list').innerHTML = '';
+  _progressRows.clear();
   document.getElementById('progress-wrap').style.display = 'block';
 }
 
-function updateProgress(pct, file) {
-  document.getElementById('progress-bar').style.width = Math.min(pct, 100) + '%';
-  if (file) document.getElementById('progress-label').textContent = file;
+function updateProgress(pct, file, status) {
+  if (status === 'done') pct = 100;
+  const pctClamped = Math.min(Math.max(pct ?? 0, 0), 100);
+  const key = file || '__default__';
+  const list = document.getElementById('progress-list');
+
+  let entry = _progressRows.get(key);
+  if (!entry) {
+    const displayName = file.includes('/') ? file.split('/').pop() : file;
+    const row = document.createElement('div');
+    row.innerHTML =
+      `<div class="progress-row-header"><span>${displayName}</span><span class="progress-row-pct">0%</span></div>` +
+      `<div class="progress-bar-bg"><div class="progress-bar" style="width:0%"></div></div>`;
+    list.appendChild(row);
+    entry = { bar: row.querySelector('.progress-bar'), pctEl: row.querySelector('.progress-row-pct') };
+    _progressRows.set(key, entry);
+  }
+
+  entry.bar.style.width = pctClamped + '%';
+  entry.pctEl.textContent = Math.round(pctClamped) + '%';
 }
 
 function hideProgress() {
