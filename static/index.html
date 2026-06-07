@@ -604,7 +604,7 @@ async function processBlob(blob) {
       );
       llmEngine = await Engine.create({
         model: modelSrc,
-        mainExecutorSettings: { maxNumTokens: 8192 },
+        mainExecutorSettings: { maxNumTokens: 16384 },
       });
       if (modelSrc.startsWith('blob:')) modelObjectUrl = modelSrc;
       hideProgress();
