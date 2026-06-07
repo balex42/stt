@@ -119,20 +119,35 @@
   .results-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
   @media (max-width: 640px) { .results-grid { grid-template-columns: 1fr; } }
 
+  .result-box {
+    display: flex; flex-direction: column;
+  }
   .result-box h2 {
     font-size: 0.8rem; text-transform: uppercase; letter-spacing: .08em;
-    color: #64748b; margin-bottom: 0.6rem;
+    color: #64748b; margin-bottom: 0.6rem; flex-shrink: 0;
   }
   .result-box pre {
     background: #0f1117; border: 1px solid #2d3348; border-radius: 8px;
     padding: 0.9rem; font-size: 0.82rem; line-height: 1.6;
-    overflow-y: auto; max-height: 400px; white-space: pre-wrap;
-    word-break: break-word; color: #cbd5e1;
+    overflow-y: auto; white-space: pre-wrap;
+    word-break: break-word; color: #cbd5e1; flex: 1;
   }
+  #transcript-out {
+    width: 100%; background: #0f1117; border: 1px solid #2d3348; border-radius: 8px;
+    padding: 0.9rem; font-size: 0.82rem; line-height: 1.6;
+    min-height: max(300px, 40vh); white-space: pre-wrap;
+    word-break: break-word; color: #cbd5e1;
+    font-family: inherit; resize: none; outline: none; flex: 1;
+  }
+  #transcript-out:focus { border-color: #3b82f6; }
   .protocol-content {
     background: #0f1117; border: 1px solid #2d3348; border-radius: 8px;
     padding: 0.9rem; font-size: 0.88rem; line-height: 1.7;
-    overflow-y: auto; max-height: 400px;
+    overflow-y: auto; min-height: max(300px, 40vh); flex: 1;
+  }
+  .gen-counter {
+    display: flex; align-items: center; gap: 0.6rem;
+    color: #64748b; font-size: 0.88rem; padding: 0.25rem 0;
   }
   .protocol-content h3 {
     font-size: 0.75rem; text-transform: uppercase; letter-spacing: .07em;
@@ -149,15 +164,8 @@
   }
   .protocol-content td { padding: .35rem .6rem; border-bottom: 1px solid #1e2130; }
 
-  .streaming-pre {
-    background: #0f1117; border: 1px solid #2d3348; border-radius: 8px;
-    padding: 0.9rem; font-size: 0.82rem; line-height: 1.6;
-    overflow-y: auto; max-height: 400px; white-space: pre-wrap;
-    word-break: break-word; color: #94a3b8; font-style: italic;
-    display: none;
-  }
 
-  .download-row { margin-top: 1rem; display: flex; justify-content: flex-end; }
+  .action-row { margin-top: 1rem; display: flex; justify-content: flex-end; align-items: center; gap: 0.5rem; }
 
   footer {
     max-width: 960px;
@@ -209,16 +217,16 @@
   <div class="results-grid">
     <div class="result-box">
       <h2>Rohtranskript</h2>
-      <pre id="transcript-out"></pre>
+      <textarea id="transcript-out" spellcheck="false"></textarea>
     </div>
     <div class="result-box">
       <h2>Meetingprotokoll</h2>
-      <pre class="streaming-pre" id="stream-out"></pre>
       <div class="protocol-content" id="protocol-out"></div>
     </div>
   </div>
-  <div class="download-row">
-    <button class="btn btn-ghost" id="download-btn">Herunterladen (.md)</button>
+  <div class="action-row">
+    <button class="btn btn-ghost" id="regen-btn" disabled>Protokoll neu erstellen</button>
+    <button class="btn btn-ghost" id="download-btn" disabled>Herunterladen (.md)</button>
   </div>
 </div>
 
@@ -234,18 +242,25 @@
 // ---------------------------------------------------------------------------
 const WHISPER_MODEL = 'onnx-community/whisper-large-v3-turbo';
 
-const SYSTEM_PROMPT = `Du bist ein professioneller Meetingsekretär.
-Erstelle auf Basis des gegebenen Meetingtranskripts ein strukturiertes Meetingprotokoll auf Deutsch.
-Gib NUR gültiges JSON zurück — keine Markdown-Umrandungen, keine Erklärungen, keinen zusätzlichen Text.
-Verwende exakt dieses Schema:
+const SYSTEM_PROMPT = `Du bist ein erfahrener Meetingsekretär. Analysiere das Transkript und erstelle ein sachliches Protokoll auf Deutsch.
+
+Gib NUR gültiges JSON zurück — keine Markdown-Blöcke, keine Erklärungen, kein zusätzlicher Text.
+
+Regeln:
+- "zusammenfassung": 3-5 Sätze — Zweck des Meetings, zentrale Diskussionspunkte, Ergebnis
+- "hauptentscheidungen": Nur echte Beschlüsse oder klare Einigungen (keine bloßen Diskussionspunkte)
+- "aufgaben": Nur konkrete Aufträge mit erkennbarem Verantwortlichen oder Termin; vage Absichten weglassen
+- "hauptthemen": Die inhaltlichen Schwerpunkte als prägnante Stichpunkte
+
+Schema (strikt einhalten):
 {
-  "zusammenfassung": "Überblick in 2-4 Sätzen",
-  "hauptentscheidungen": ["Entscheidung als Text"],
-  "aufgaben": [{"aufgabe": "Text", "verantwortlich": "Text oder null", "faellig": "Text oder null"}],
-  "hauptthemen": ["Thema als Text"]
+  "zusammenfassung": "…",
+  "hauptentscheidungen": ["Vollständiger Satz pro Beschluss"],
+  "aufgaben": [{"aufgabe": "Konkreter Auftrag", "verantwortlich": "Name/Rolle oder null", "faellig": "Frist oder null"}],
+  "hauptthemen": ["Stichpunkt"]
 }
-Falls ein Feld keinen Inhalt hat, verwende eine leere Liste oder null.
-Schreibe alle Textwerte auf Deutsch.`;
+
+Leere Felder: leere Liste [] oder null.`;
 
 // ---------------------------------------------------------------------------
 // Whisper Web Worker source (runs inference off the main thread)
@@ -294,6 +309,7 @@ self.addEventListener('message', async ({ data: msg }) => {
         chunk_length_s: 30,
         stride_length_s: 5,
         num_beams: 1,
+        no_repeat_ngram_size: 5,
         streamer,
       });
       self.postMessage({ type: 'complete', text: result.text ?? accumulated });
@@ -328,8 +344,8 @@ const { Engine, loadLiteRtLm } = hasJSPI
 
 // Gemma model: local in Docker, HuggingFace CDN in dev mode
 const GEMMA_MODEL = useLocalVendor
-  ? '/models/gemma/gemma-4-E2B-it-web.litertlm'
-  : 'https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it-web.litertlm';
+  ? '/models/gemma/gemma-4-E4B-it-web.litertlm'
+  : 'https://huggingface.co/litert-community/gemma-4-E4B-it-litert-lm/resolve/main/gemma-4-E4B-it-web.litertlm';
 
 // ---------------------------------------------------------------------------
 // State
@@ -516,7 +532,7 @@ function workerRun(type, payload, transfer = []) {
           break;
         case 'partial': {
           const out = document.getElementById('transcript-out');
-          out.textContent = data.text;
+          out.value = data.text;
           out.scrollTop = out.scrollHeight;
           document.getElementById('results').style.display = 'block';
           break;
@@ -553,6 +569,104 @@ function workerRun(type, payload, transfer = []) {
 }
 
 // ---------------------------------------------------------------------------
+// Transcript post-processing
+// ---------------------------------------------------------------------------
+function cleanTranscript(text) {
+  // Strip German filler words (äh, ähm, äm, hm)
+  let t = text.replace(/\b(äh+m?|äm+|eh+m?|hm+)\b[\s,]*/gi, '');
+  t = t.replace(/[ \t]{2,}/g, ' ').trim();
+
+  // Word-level sliding window dedup: if a run of 6+ consecutive words already
+  // appeared in the preceding 100 words, skip it. Catches Whisper repetition
+  // loops regardless of sentence boundaries.
+  const words = t.split(/\s+/);
+  const MIN_LEN = 6;
+  const WINDOW  = 100;
+  const out = [];
+  let i = 0;
+  while (i < words.length) {
+    const hay = out.slice(Math.max(0, out.length - WINDOW)).map(w => w.toLowerCase()).join(' ');
+    let skipped = false;
+    for (let len = Math.min(40, words.length - i); len >= MIN_LEN; len--) {
+      const needle = words.slice(i, i + len).map(w => w.toLowerCase()).join(' ');
+      if (hay.includes(needle)) {
+        i += len;
+        skipped = true;
+        break;
+      }
+    }
+    if (!skipped) out.push(words[i++]);
+  }
+  return out.join(' ');
+}
+
+// ---------------------------------------------------------------------------
+// LLM protocol generation (can be called standalone from the regen button)
+// ---------------------------------------------------------------------------
+async function generateProtocol(transcript) {
+  document.getElementById('regen-btn').disabled = true;
+  setStatus('<span class="spinner"></span>Gemma 4 E4B wird geladen…', 'info');
+
+  if (!Engine) {
+    throw new Error('Protokollerstellung erfordert Chrome 123+. Die Transkription war erfolgreich — siehe Rohtranskript oben.');
+  }
+
+  if (!llmEngine) {
+    if (useLocalVendor && loadLiteRtLm && !litrtLmLoadPromise) {
+      litrtLmLoadPromise = loadLiteRtLm('/vendor/litert-lm-wasm/');
+    }
+    if (litrtLmLoadPromise) await litrtLmLoadPromise;
+
+    showProgress('Gemma 4 E4B-Modell wird geladen…');
+    const modelSrc = await fetchWithOPFSCache(
+      GEMMA_MODEL,
+      pct => updateProgress(pct, GEMMA_MODEL.split('/').pop()),
+    );
+    llmEngine = await Engine.create({
+      model: modelSrc,
+      mainExecutorSettings: { maxNumTokens: 16384 },
+    });
+    if (modelSrc.startsWith('blob:')) modelObjectUrl = modelSrc;
+    hideProgress();
+  }
+
+  setStatus('<span class="spinner"></span>Protokoll wird erstellt…', 'info');
+  const conv = await llmEngine.createConversation({
+    preface: { messages: [{ role: 'system', content: SYSTEM_PROMPT }] },
+    sessionConfig: {
+      samplerParams: { temperature: 1.0, k: 64, p: 0.95 },
+    },
+  });
+
+  const protocolEl = document.getElementById('protocol-out');
+  protocolEl.innerHTML =
+    '<div class="gen-counter"><span class="spinner"></span>' +
+    '<span>Generiere… <strong id="token-count">0</strong> Zeichen</span></div>';
+
+  let buffer = '';
+  let charCount = 0;
+
+  for await (const chunk of conv.sendMessageStreaming(`Meetingtranskript:\n\n${transcript}`)) {
+    for (const item of chunk.content) {
+      if (item.type === 'text') {
+        buffer += item.text;
+        charCount += item.text.length;
+        const countEl = document.getElementById('token-count');
+        if (countEl) countEl.textContent = charCount;
+      }
+    }
+  }
+
+  const protocol = parseProtocol(buffer);
+  lastData = { transcript, protocol };
+  renderProtocol(protocol);
+  document.getElementById('download-btn').disabled = false;
+  document.getElementById('regen-btn').disabled = false;
+  document.getElementById('results').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  setStatus('Fertig.', '');
+}
+
+// ---------------------------------------------------------------------------
 // Core processing pipeline
 // ---------------------------------------------------------------------------
 async function processBlob(blob) {
@@ -560,7 +674,6 @@ async function processBlob(blob) {
   resetResults();
 
   try {
-    // 1. Transcribe
     setStatus('<span class="spinner"></span>Audio wird verarbeitet…', 'info');
     const audio = await blobToFloat32(blob);
 
@@ -573,72 +686,18 @@ async function processBlob(blob) {
 
     const totalDuration = audio.length / 16000;
     setStatus('<span class="spinner"></span>Transkription läuft… (' + fmtTime(totalDuration) + ' insgesamt)', 'info');
-    // Transfer the audio buffer to the worker (zero-copy)
-    const asrResult  = await workerRun(
+    const asrResult = await workerRun(
       'transcribe',
       { audio: audio.buffer, totalDuration },
       [audio.buffer],
     );
-    const transcript = (asrResult.text ?? '').trim();
-    // Overwrite partial chunks with the final clean result
-    document.getElementById('transcript-out').textContent = transcript || '(leer)';
+    const transcript = cleanTranscript((asrResult.text ?? '').trim());
+    const transcriptEl = document.getElementById('transcript-out');
+    transcriptEl.value = transcript || '(leer)';
     document.getElementById('results').style.display = 'block';
+    document.getElementById('regen-btn').disabled = false;
 
-    // 2. Generate protocol
-    setStatus('<span class="spinner"></span>Gemma 4 E2B wird geladen…', 'info');
-
-    if (!Engine) {
-      throw new Error('Protokollerstellung erfordert Chrome 123+. Die Transkription war erfolgreich — siehe Rohtranskript oben.');
-    }
-
-    if (!llmEngine) {
-      if (useLocalVendor && loadLiteRtLm && !litrtLmLoadPromise) {
-        litrtLmLoadPromise = loadLiteRtLm('/vendor/litert-lm-wasm/');
-      }
-      if (litrtLmLoadPromise) await litrtLmLoadPromise;
-
-      showProgress('Gemma 4 E2B-Modell wird geladen…');
-      const modelSrc = await fetchWithOPFSCache(
-        GEMMA_MODEL,
-        pct => updateProgress(pct, GEMMA_MODEL.split('/').pop()),
-      );
-      llmEngine = await Engine.create({
-        model: modelSrc,
-        mainExecutorSettings: { maxNumTokens: 16384 },
-      });
-      if (modelSrc.startsWith('blob:')) modelObjectUrl = modelSrc;
-      hideProgress();
-    }
-
-    setStatus('<span class="spinner"></span>Protokoll wird erstellt…', 'info');
-    const conv = await llmEngine.createConversation({
-      preface: { messages: [{ role: 'system', content: SYSTEM_PROMPT }] },
-    });
-
-    // Stream tokens into the raw stream box while accumulating
-    const streamEl = document.getElementById('stream-out');
-    streamEl.style.display = 'block';
-    streamEl.textContent = '';
-    let buffer = '';
-
-    for await (const chunk of conv.sendMessageStreaming(`Meetingtranskript:\n\n${transcript}`)) {
-      for (const item of chunk.content) {
-        if (item.type === 'text') {
-          buffer += item.text;
-          streamEl.textContent = buffer;
-          streamEl.scrollTop = streamEl.scrollHeight;
-        }
-      }
-    }
-
-    streamEl.style.display = 'none';
-
-    // 3. Parse & render
-    const protocol = parseProtocol(buffer);
-    lastData = { transcript, protocol };
-    renderProtocol(protocol);
-    document.getElementById('results').scrollIntoView({ behavior: 'smooth', block: 'start' });
-    setStatus('Fertig.', '');
+    await generateProtocol(transcript);
 
   } catch (e) {
     setStatus('Fehler: ' + e.message, 'error');
@@ -774,16 +833,36 @@ function hideProgress() {
 }
 
 function resetResults() {
-  document.getElementById('transcript-out').textContent = '';
+  document.getElementById('transcript-out').value = '';
+  document.getElementById('regen-btn').disabled = true;
+  document.getElementById('download-btn').disabled = true;
   document.getElementById('protocol-out').innerHTML = '';
-  document.getElementById('stream-out').textContent = '';
-  document.getElementById('stream-out').style.display = 'none';
   lastData = null;
 }
+
+document.getElementById('regen-btn').addEventListener('click', async () => {
+  const transcript = document.getElementById('transcript-out').value.trim();
+  if (!transcript) return;
+  setAllBusy(true);
+  try {
+    await generateProtocol(transcript);
+  } catch (e) {
+    setStatus('Fehler: ' + e.message, 'error');
+    console.error(e);
+  } finally {
+    setAllBusy(false);
+  }
+});
 
 function setAllBusy(busy) {
   uploadBtn.disabled  = busy || !fileInput.files[0];
   recordBtn.disabled  = busy;
+  const regenBtn = document.getElementById('regen-btn');
+  if (busy) regenBtn.disabled = true;
+  else if (document.getElementById('transcript-out').value) regenBtn.disabled = false;
+  const downloadBtn = document.getElementById('download-btn');
+  if (busy) downloadBtn.disabled = true;
+  else if (lastData) downloadBtn.disabled = false;
 }
 </script>
 </body>

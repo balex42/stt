@@ -21,8 +21,8 @@ This project builds on the following open-source libraries and models.
 - Base model license: MIT (OpenAI)
 - Source: https://huggingface.co/onnx-community/whisper-large-v3-turbo
 
-## Gemma 4 E2B
-- Model ID: litert-community/gemma-4-E2B-it-litert-lm (LiteRT conversion of google/gemma-4-E2B-it)
+## Gemma 4 E4B
+- Model ID: litert-community/gemma-4-E4B-it-litert-lm (LiteRT conversion of google/gemma-4-E4B-it)
 - License: Apache 2.0 (https://ai.google.dev/gemma/apache_2)
 - Copyright: Google DeepMind
-- Source: https://huggingface.co/google/gemma-4-E2B-it
+- Source: https://huggingface.co/google/gemma-4-E4B-it

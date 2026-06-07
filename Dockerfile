@@ -67,10 +67,10 @@ RUN BASE=https://huggingface.co/onnx-community/whisper-large-v3-turbo/resolve/ma
     curl -fsSL --retry 3 --retry-delay 10 -K /tmp/hf.curlrc \
       "${BASE}/decoder_model_merged_q4.onnx" -o "${DEST}/decoder_model_merged_q4.onnx"
 
-# ── Gemma 4 E2B model (~2 GB) ─────────────────────────────────────────────
+# ── Gemma 4 E4B model (~3.5 GB) ───────────────────────────────────────────
 RUN curl -fsSL --retry 3 --retry-delay 10 -K /tmp/hf.curlrc \
-    'https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it-web.litertlm' \
-    -o models/gemma/gemma-4-E2B-it-web.litertlm
+    'https://huggingface.co/litert-community/gemma-4-E4B-it-litert-lm/resolve/main/gemma-4-E4B-it-web.litertlm' \
+    -o models/gemma/gemma-4-E4B-it-web.litertlm
 
 # Stage 2 — minimal production image
 FROM node:22-alpine
