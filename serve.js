@@ -22,6 +22,13 @@ const SECURITY = {
   'Referrer-Policy':              'no-referrer',
 };
 
+function cacheControl(pathname) {
+  if (pathname.startsWith('/vendor/') || pathname.startsWith('/models/')) {
+    return 'public, max-age=31536000, immutable';
+  }
+  return 'no-cache';
+}
+
 createServer(async (req, res) => {
   if (req.method !== 'GET' && req.method !== 'HEAD') {
     res.writeHead(405, { ...SECURITY, Allow: 'GET, HEAD' });
@@ -45,11 +52,37 @@ createServer(async (req, res) => {
 
   try {
     const { size } = await stat(filePath);
-    res.writeHead(200, {
+    const headers = {
       'Content-Type': MIME[extname(filePath)] ?? 'application/octet-stream',
-      'Content-Length': size,
+      'Accept-Ranges': 'bytes',
+      'Cache-Control': cacheControl(pathname),
       ...SECURITY,
-    });
+    };
+
+    const rangeHeader = req.headers.range;
+    if (rangeHeader) {
+      const match = rangeHeader.match(/^bytes=(\d+)-(\d*)$/);
+      if (match) {
+        const start = parseInt(match[1], 10);
+        const end   = match[2] ? parseInt(match[2], 10) : size - 1;
+        if (start > end || start >= size || end >= size) {
+          res.writeHead(416, { ...SECURITY, 'Content-Range': `bytes */${size}` });
+          res.end();
+          return;
+        }
+        res.writeHead(206, {
+          ...headers,
+          'Content-Length': end - start + 1,
+          'Content-Range':  `bytes ${start}-${end}/${size}`,
+        });
+        if (req.method === 'HEAD') { res.end(); return; }
+        createReadStream(filePath, { start, end }).pipe(res);
+        return;
+      }
+      // multi-range or unrecognised format — fall through to 200
+    }
+
+    res.writeHead(200, { ...headers, 'Content-Length': size });
     if (req.method === 'HEAD') { res.end(); return; }
     createReadStream(filePath).pipe(res);
   } catch {
