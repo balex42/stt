@@ -67,6 +67,18 @@
   .file-label:hover { border-color: #3b82f6; color: #e2e8f0; }
   #file-name { font-size: 0.85rem; color: #64748b; margin-bottom: 0.75rem; }
 
+  .meta-row {
+    display: flex; gap: 0.5rem; margin-bottom: 1.25rem; flex-wrap: wrap;
+  }
+  .meta-input {
+    flex: 1; min-width: 150px;
+    padding: 0.45rem 0.75rem; border-radius: 8px;
+    border: 1px solid #2d3348; background: #0f1117; color: #e2e8f0;
+    font-size: 0.88rem; outline: none;
+  }
+  .meta-input:focus { border-color: #3b82f6; }
+  .meta-input::placeholder { color: #4b5563; }
+
   .record-row { display: flex; align-items: center; gap: 1rem; }
   .dot { width: 12px; height: 12px; border-radius: 50%; background: #ef4444; display: none; }
   .dot.pulse { display: block; animation: pulse 1.2s ease-in-out infinite; }
@@ -186,6 +198,11 @@
 </header>
 
 <div class="card">
+  <div class="meta-row">
+    <input class="meta-input" type="text" id="meta-title" placeholder="Meeting-Titel (optional)">
+    <input class="meta-input" type="date" id="meta-date">
+    <input class="meta-input" type="text" id="meta-participants" placeholder="Teilnehmer (optional, kommagetrennt)">
+  </div>
   <div class="tabs">
     <button class="tab active" data-tab="upload">Datei hochladen</button>
     <button class="tab" data-tab="record">Live-Aufnahme</button>
@@ -251,6 +268,7 @@ Regeln:
 - "hauptentscheidungen": Nur echte Beschlüsse oder klare Einigungen (keine bloßen Diskussionspunkte)
 - "aufgaben": Nur konkrete Aufträge mit erkennbarem Verantwortlichen oder Termin; vage Absichten weglassen
 - "hauptthemen": Die inhaltlichen Schwerpunkte als prägnante Stichpunkte
+- Wenn Teilnehmer angegeben sind, weise Aufgaben ("verantwortlich") bevorzugt diesen Personen zu.
 
 Schema (strikt einhalten):
 {
@@ -601,9 +619,84 @@ function cleanTranscript(text) {
 }
 
 // ---------------------------------------------------------------------------
+// Meeting metadata helpers
+// ---------------------------------------------------------------------------
+function getMeta() {
+  return {
+    title:        document.getElementById('meta-title').value.trim(),
+    date:         document.getElementById('meta-date').value,
+    participants: document.getElementById('meta-participants').value.trim(),
+  };
+}
+
+function buildUserMessage(transcript, meta = {}, isCondensed = false) {
+  const lines = [];
+  if (meta.title)        lines.push(`Meeting: ${meta.title}`);
+  if (meta.date)         lines.push(`Datum: ${meta.date}`);
+  if (meta.participants) lines.push(`Teilnehmer: ${meta.participants}`);
+  if (lines.length)      lines.push('');
+  if (isCondensed) {
+    lines.push('Hinweis: Das Transkript wurde wegen seiner Länge abschnittsweise kondensiert.');
+    lines.push('');
+  }
+  lines.push('Meetingtranskript:', '', transcript);
+  return lines.join('\n');
+}
+
+function splitAtSentences(text, maxChars) {
+  const chunks = [];
+  let start = 0;
+  while (start < text.length) {
+    if (start + maxChars >= text.length) {
+      chunks.push(text.slice(start).trim());
+      break;
+    }
+    const win  = text.slice(start, start + maxChars);
+    const last = Math.max(win.lastIndexOf('. '), win.lastIndexOf('! '), win.lastIndexOf('? '));
+    const cut  = last > 0 ? last + 1 : maxChars;
+    chunks.push(text.slice(start, start + cut).trim());
+    start += cut;
+    while (start < text.length && text[start] === ' ') start++;
+  }
+  return chunks.filter(c => c.length > 0);
+}
+
+function slugify(s) {
+  return s.toLowerCase()
+    .replace(/[äÄ]/g, 'ae').replace(/[öÖ]/g, 'oe').replace(/[üÜ]/g, 'ue').replace(/ß/g, 'ss')
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
+// ---------------------------------------------------------------------------
+// LLM single-turn streaming helper (creates a fresh conversation each call)
+// ---------------------------------------------------------------------------
+async function streamConversation(systemPrompt, userMessage, showCounter = false) {
+  const conv = await llmEngine.createConversation({
+    preface: { messages: [{ role: 'system', content: systemPrompt }] },
+    sessionConfig: { samplerParams: { temperature: 0.3, k: 40, p: 0.9 } },
+  });
+  let buffer = '';
+  let charCount = 0;
+  for await (const chunk of conv.sendMessageStreaming(userMessage)) {
+    for (const item of chunk.content) {
+      if (item.type === 'text') {
+        buffer += item.text;
+        if (showCounter) {
+          charCount += item.text.length;
+          const el = document.getElementById('token-count');
+          if (el) el.textContent = charCount;
+        }
+      }
+    }
+  }
+  return buffer;
+}
+
+// ---------------------------------------------------------------------------
 // LLM protocol generation (can be called standalone from the regen button)
 // ---------------------------------------------------------------------------
-async function generateProtocol(transcript) {
+async function generateProtocol(transcript, meta = {}) {
   document.getElementById('regen-btn').disabled = true;
   setStatus('<span class="spinner"></span>Gemma 4 E4B wird geladen…', 'info');
 
@@ -630,36 +723,51 @@ async function generateProtocol(transcript) {
     hideProgress();
   }
 
-  setStatus('<span class="spinner"></span>Protokoll wird erstellt…', 'info');
-  const conv = await llmEngine.createConversation({
-    preface: { messages: [{ role: 'system', content: SYSTEM_PROMPT }] },
-    sessionConfig: {
-      samplerParams: { temperature: 1.0, k: 64, p: 0.95 },
-    },
-  });
+  // Map-reduce for long transcripts that would exceed the context window
+  const PROMPT_OVERHEAD  = 1000;
+  const MAX_TOKENS       = 15000;
+  const CHUNK_TOKENS     = 8000;
+  const SUMMARY_PROMPT   = 'Fasse diesen Transkriptabschnitt sachlich zusammen. Erhalte alle Entscheidungen, Aufgaben (mit Verantwortlichen und Fristen) und Themen. Antworte als Fließtext.';
 
+  let inputTranscript = transcript;
+  let isCondensed     = false;
+
+  if ((transcript.length / 4) + PROMPT_OVERHEAD > MAX_TOKENS) {
+    const chunks = splitAtSentences(transcript, CHUNK_TOKENS * 4);
+    const summaries = [];
+    for (let i = 0; i < chunks.length; i++) {
+      setStatus(`<span class="spinner"></span>Abschnitt ${i + 1}/${chunks.length} wird zusammengefasst…`, 'info');
+      summaries.push(await streamConversation(SUMMARY_PROMPT, chunks[i]));
+    }
+    inputTranscript = summaries.join('\n\n');
+    isCondensed = true;
+  }
+
+  setStatus('<span class="spinner"></span>Protokoll wird erstellt…', 'info');
   const protocolEl = document.getElementById('protocol-out');
-  protocolEl.innerHTML =
+  const genCounter = () =>
     '<div class="gen-counter"><span class="spinner"></span>' +
     '<span>Generiere… <strong id="token-count">0</strong> Zeichen</span></div>';
 
-  let buffer = '';
-  let charCount = 0;
+  protocolEl.innerHTML = genCounter();
+  const userMessage = buildUserMessage(inputTranscript, meta, isCondensed);
+  let buffer = await streamConversation(SYSTEM_PROMPT, userMessage, true);
+  let protocol = parseProtocol(buffer);
 
-  for await (const chunk of conv.sendMessageStreaming(`Meetingtranskript:\n\n${transcript}`)) {
-    for (const item of chunk.content) {
-      if (item.type === 'text') {
-        buffer += item.text;
-        charCount += item.text.length;
-        const countEl = document.getElementById('token-count');
-        if (countEl) countEl.textContent = charCount;
-      }
-    }
+  // Retry once if the model returned non-JSON output
+  if (protocol.raw_output !== undefined) {
+    setStatus('<span class="spinner"></span>Antwort war kein gültiges JSON – zweiter Versuch…', 'info');
+    protocolEl.innerHTML = genCounter();
+    buffer = await streamConversation(
+      SYSTEM_PROMPT,
+      userMessage + '\n\nAntworte ausschließlich mit dem JSON-Objekt.',
+      true,
+    );
+    protocol = parseProtocol(buffer);
   }
 
-  const protocol = parseProtocol(buffer);
-  lastData = { transcript, protocol };
-  renderProtocol(protocol);
+  lastData = { transcript, protocol, meta };
+  renderProtocol(protocol, meta);
   document.getElementById('download-btn').disabled = false;
   document.getElementById('regen-btn').disabled = false;
   document.getElementById('results').scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -697,7 +805,7 @@ async function processBlob(blob) {
     document.getElementById('results').style.display = 'block';
     document.getElementById('regen-btn').disabled = false;
 
-    await generateProtocol(transcript);
+    await generateProtocol(transcript, getMeta());
 
   } catch (e) {
     setStatus('Fehler: ' + e.message, 'error');
@@ -726,9 +834,15 @@ function parseProtocol(raw) {
 // ---------------------------------------------------------------------------
 // Render protocol HTML
 // ---------------------------------------------------------------------------
-function renderProtocol(p) {
+function renderProtocol(p, meta = {}) {
   const esc = s => String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
   let html = '';
+
+  if (meta.title || meta.date || meta.participants) {
+    if (meta.title) html += `<h3 style="font-size:1rem;text-transform:none;letter-spacing:0;color:#f8fafc;margin-bottom:.2rem">${esc(meta.title)}</h3>`;
+    const sub = [meta.date, meta.participants].filter(Boolean).map(esc).join(' · ');
+    if (sub) html += `<p style="color:#64748b;font-size:.82rem;margin-bottom:.75rem">${sub}</p>`;
+  }
 
   if (p.raw_output) {
     html += `<p style="color:#f87171;margin-bottom:.5rem">JSON konnte nicht geparst werden — Rohausgabe unten.</p>`;
@@ -762,9 +876,14 @@ function renderProtocol(p) {
 // ---------------------------------------------------------------------------
 document.getElementById('download-btn').addEventListener('click', () => {
   if (!lastData) return;
-  const { transcript, protocol: p } = lastData;
-  const now = new Date().toISOString().slice(0, 10);
-  let md = `# Meetingprotokoll\n_Erstellt: ${now}_\n\n`;
+  const { transcript, protocol: p, meta = {} } = lastData;
+  const date  = meta.date  || new Date().toISOString().slice(0, 10);
+  const title = meta.title || 'Meetingprotokoll';
+
+  let md = `# ${title}\n_Datum: ${date}`;
+  if (meta.participants) md += ` · Teilnehmer: ${meta.participants}`;
+  md += `_\n\n`;
+
   md += `## Zusammenfassung\n${p.zusammenfassung || '—'}\n\n`;
   if ((p.hauptentscheidungen || []).length) {
     md += `## Hauptentscheidungen\n` + p.hauptentscheidungen.map(d => `- ${d}`).join('\n') + '\n\n';
@@ -779,11 +898,12 @@ document.getElementById('download-btn').addEventListener('click', () => {
   }
   md += `---\n## Rohtranskript\n${transcript}\n`;
 
-  const blob = new Blob([md], { type: 'text/markdown' });
-  const url  = URL.createObjectURL(blob);
-  const a    = document.createElement('a');
-  a.href = url;
-  a.download = `protokoll_${new Date().toISOString().slice(0,16).replace('T','_')}.md`;
+  const blob     = new Blob([md], { type: 'text/markdown' });
+  const url      = URL.createObjectURL(blob);
+  const a        = document.createElement('a');
+  a.href         = url;
+  const prefix   = meta.title ? slugify(meta.title) : 'protokoll';
+  a.download     = `${prefix}_${date}.md`;
   a.click();
   URL.revokeObjectURL(url);
 });
@@ -845,7 +965,7 @@ document.getElementById('regen-btn').addEventListener('click', async () => {
   if (!transcript) return;
   setAllBusy(true);
   try {
-    await generateProtocol(transcript);
+    await generateProtocol(transcript, getMeta());
   } catch (e) {
     setStatus('Fehler: ' + e.message, 'error');
     console.error(e);
@@ -864,6 +984,8 @@ function setAllBusy(busy) {
   if (busy) downloadBtn.disabled = true;
   else if (lastData) downloadBtn.disabled = false;
 }
+
+document.getElementById('meta-date').value = new Date().toISOString().slice(0, 10);
 </script>
 </body>
 </html>
