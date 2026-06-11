@@ -240,10 +240,13 @@
       <option value="english">English</option>
       <option value="auto">Auto</option>
     </select>
-    <label class="diar-label" title="Erkennt Sprecher und beschriftet das Transkript. Bei Live-Aufnahmen wird das Audio nach dem Stoppen vollständig neu verarbeitet.">
-      <input type="checkbox" id="diar-check">
-      Sprechererkennung
-    </label>
+    <div>
+      <label class="diar-label">
+        <input type="checkbox" id="diar-check">
+        Sprechererkennung
+      </label>
+      <div id="diar-hint" style="display:none;font-size:.72rem;color:#475569;padding-left:1.3rem;margin-top:.1rem">verlängert Verarbeitung bei Live-Aufnahmen</div>
+    </div>
   </div>
 
   <div class="tab-panel active" id="tab-upload">
@@ -842,8 +845,8 @@ function stripFillers(text, language = 'german') {
   // "eh" is omitted — "eh" is a real German word ("das wollte ich eh machen").
   // "hm" and "ehm" are ASCII-only fillers so \b works on both sides for them.
   t = t
-    .replace(/(^|[ \t,])(?:äh+m?|äm+)\b[ \t,]*/gi, '$1')
-    .replace(/\b(?:hm+|ehm+)\b[ \t,]*/gi, '');
+    .replace(/(?<=^|[\s,])(?:äh+m?|äm+)\b[\s,]*/gi, '')  // lookbehind: doesn't consume → consecutive fillers all match
+    .replace(/\b(?:hm+|ehm+)\b[\s,]*/gi, '');
 
   if (language === 'english') {
     // Full English set: uh, um. Bare "er" omitted — too common in loanwords.
@@ -1502,6 +1505,10 @@ window.addEventListener('beforeunload', e => {
 // Initialise storage info and session restore offer
 refreshStorageInfo();
 checkSavedSession();
+
+document.getElementById('diar-check').addEventListener('change', e => {
+  document.getElementById('diar-hint').style.display = e.target.checked ? 'block' : 'none';
+});
 </script>
 </body>
 </html>
