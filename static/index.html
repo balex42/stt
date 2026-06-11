@@ -240,7 +240,7 @@
       <option value="english">English</option>
       <option value="auto">Auto</option>
     </select>
-    <label class="diar-label">
+    <label class="diar-label" title="Erkennt Sprecher und beschriftet das Transkript. Bei Live-Aufnahmen wird das Audio nach dem Stoppen vollständig neu verarbeitet.">
       <input type="checkbox" id="diar-check">
       Sprechererkennung
     </label>
@@ -381,7 +381,7 @@ self.addEventListener('message', async ({ data: msg }) => {
       // Omit language entirely for auto-detect (null/undefined/falsy → let Whisper decide)
       if (msg.language) asrOpts.language = msg.language;
       const result = await asr(new Float32Array(msg.audio), asrOpts);
-      self.postMessage({ type: 'complete', text: result.text ?? accumulated, chunks: result.chunks ?? [] });
+      self.postMessage({ type: 'complete', text: result.text ?? accumulated, chunks: msg.returnChunks ? (result.chunks ?? []) : undefined });
     } catch (e) { self.postMessage({ type: 'error', message: e.message }); }
     return;
   }
@@ -833,12 +833,28 @@ function workerRun(type, payload, transfer = []) {
 // Transcript post-processing
 // ---------------------------------------------------------------------------
 function stripFillers(text, language = 'german') {
-  const german  = /\b(äh+m?|äm+|eh+m?|hm+)\b[\s,]*/gi;
-  const english = /\b(uh+|um+|erm+|er)\b[\s,]*/gi;
   let t = text;
-  if (language === 'english')   t = t.replace(english, '');
-  else if (language === 'auto') t = t.replace(german, '').replace(english, '');
-  else                          t = t.replace(german, '');
+
+  // German Unicode fillers (äh, ähm, äm): JS \b is ASCII-only — it treats ä as a
+  // non-word char, so \bäh never matches. Fix: anchor the *leading* boundary to
+  // explicit whitespace/start; \b still works correctly for the trailing boundary
+  // because äh/äm always end with h or m, both ASCII \w chars.
+  // "eh" is omitted — "eh" is a real German word ("das wollte ich eh machen").
+  // "hm" and "ehm" are ASCII-only fillers so \b works on both sides for them.
+  t = t
+    .replace(/(^|[ \t,])(?:äh+m?|äm+)\b[ \t,]*/gi, '$1')
+    .replace(/\b(?:hm+|ehm+)\b[ \t,]*/gi, '');
+
+  if (language === 'english') {
+    // Full English set: uh, um. Bare "er" omitted — too common in loanwords.
+    t = t.replace(/\b(?:uh+|um+|err+m?|erm+)\b[ \t,]*/gi, '');
+  } else if (language === 'auto') {
+    // Only strip fillers unambiguous in both languages.
+    // "um" (German preposition/conjunction) and bare "er" (German pronoun) are excluded.
+    t = t.replace(/\b(?:uh+|err+m?|erm+)\b[ \t,]*/gi, '');
+  }
+  // German mode: no English fillers stripped.
+
   return t.replace(/[ \t]{2,}/g, ' ').trim();
 }
 
@@ -941,7 +957,8 @@ async function streamConversation(systemPrompt, userMessage, showCounter = false
       }
     }
   }
-  await conv.delete();
+  // Confirmed in @litert-lm/core 0.13.1 dist/conversation.d.ts; guard defensively.
+  if (typeof conv.delete === 'function') await conv.delete();
   return buffer;
 }
 
@@ -1412,7 +1429,8 @@ async function refreshStorageInfo() {
 async function deleteModels() {
   if (isBusy) { setStatus('Während der Verarbeitung können keine Modelle gelöscht werden.', 'error'); return; }
   if (llmEngine) {
-    try { await llmEngine.delete(); } catch {}
+    // Confirmed in @litert-lm/core 0.13.1 dist/engine.d.ts; guard defensively.
+    try { if (typeof llmEngine.delete === 'function') await llmEngine.delete(); } catch {}
     llmEngine = null;
   }
   if (modelObjectUrl) { URL.revokeObjectURL(modelObjectUrl); modelObjectUrl = null; }
@@ -1442,8 +1460,9 @@ function checkSavedSession() {
     if (!raw) return;
     const saved = JSON.parse(raw);
     if (!saved.transcript || !saved.protocol) return;
-    const time = new Date(saved.timestamp).toLocaleString('de-DE', { dateStyle: 'short', timeStyle: 'short' });
     const el = document.getElementById('status');
+    if (el.className === 'error') return; // don't overwrite e.g. the no-JSPI warning
+    const time = new Date(saved.timestamp).toLocaleString('de-DE', { dateStyle: 'short', timeStyle: 'short' });
     el.className = 'info';
     el.innerHTML =
       `Letzte Sitzung vom ${time} wiederherstellen? ` +
