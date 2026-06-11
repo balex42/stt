@@ -64,8 +64,8 @@ createServer(async (req, res) => {
       const match = rangeHeader.match(/^bytes=(\d+)-(\d*)$/);
       if (match) {
         const start = parseInt(match[1], 10);
-        const end   = match[2] ? parseInt(match[2], 10) : size - 1;
-        if (start > end || start >= size || end >= size) {
+        const end   = Math.min(match[2] ? parseInt(match[2], 10) : size - 1, size - 1);
+        if (start > end || start >= size) {
           res.writeHead(416, { ...SECURITY, 'Content-Range': `bytes */${size}` });
           res.end();
           return;

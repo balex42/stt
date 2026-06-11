@@ -294,7 +294,8 @@
 <footer>
   Built with <a href="https://ai.google.dev/gemma" target="_blank" rel="noopener">Gemma 4</a> (Google DeepMind, Apache 2.0) &middot;
   Transcription by <a href="https://openai.com/research/whisper" target="_blank" rel="noopener">Whisper</a> (OpenAI, MIT) via
-  <a href="https://github.com/huggingface/transformers.js" target="_blank" rel="noopener">Transformers.js</a> (Apache 2.0)
+  <a href="https://github.com/huggingface/transformers.js" target="_blank" rel="noopener">Transformers.js</a> (Apache 2.0) &middot;
+  Diarization by <a href="https://huggingface.co/pyannote/segmentation-3.0" target="_blank" rel="noopener">pyannote/segmentation-3.0</a> (MIT)
   <div id="storage-info"></div>
 </footer>
 
@@ -368,16 +369,18 @@ self.addEventListener('message', async ({ data: msg }) => {
         on_chunk_start: t => self.postMessage({ type: 'chunk', timestamp: t }),
       });
 
-      const result = await asr(new Float32Array(msg.audio), {
+      const asrOpts = {
         task: 'transcribe',
-        language: msg.language ?? 'german',
         return_timestamps: true,
         chunk_length_s: 30,
         stride_length_s: 5,
         num_beams: 1,
         no_repeat_ngram_size: 5,
         streamer,
-      });
+      };
+      // Omit language entirely for auto-detect (null/undefined/falsy → let Whisper decide)
+      if (msg.language) asrOpts.language = msg.language;
+      const result = await asr(new Float32Array(msg.audio), asrOpts);
       self.postMessage({ type: 'complete', text: result.text ?? accumulated, chunks: result.chunks ?? [] });
     } catch (e) { self.postMessage({ type: 'error', message: e.message }); }
     return;
@@ -635,7 +638,14 @@ recordBtn.addEventListener('click', async () => {
           const diarResult = await workerRun('diarize', { audio: fullAudio.buffer }, [fullAudio.buffer]);
           hideProgress();
           transcript = mergeTranscriptWithSpeakers(asrFull.chunks ?? [], diarResult.segments ?? []);
-          if (!transcript) transcript = cleanTranscript((asrFull.text ?? '').trim(), lang);
+          if (transcript) {
+            transcript = transcript.split('\n').map(line => {
+              const m = line.match(/^(Sprecher \d+: )([\s\S]*)$/);
+              return m ? m[1] + stripFillers(m[2], lang) : stripFillers(line, lang);
+            }).join('\n');
+          } else {
+            transcript = cleanTranscript((asrFull.text ?? '').trim(), lang);
+          }
           transcriptEl.value = transcript || '(leer)';
         } else {
           transcript = cleanTranscript(transcriptEl.value.trim(), lang);
@@ -822,14 +832,18 @@ function workerRun(type, payload, transfer = []) {
 // ---------------------------------------------------------------------------
 // Transcript post-processing
 // ---------------------------------------------------------------------------
-function cleanTranscript(text, language = 'german') {
+function stripFillers(text, language = 'german') {
   const german  = /\b(äh+m?|äm+|eh+m?|hm+)\b[\s,]*/gi;
   const english = /\b(uh+|um+|erm+|er)\b[\s,]*/gi;
   let t = text;
-  if (language === 'english')      { t = t.replace(english, ''); }
-  else if (language === 'auto')    { t = t.replace(german, '').replace(english, ''); }
-  else                             { t = t.replace(german, ''); }  // german (default)
-  t = t.replace(/[ \t]{2,}/g, ' ').trim();
+  if (language === 'english')   t = t.replace(english, '');
+  else if (language === 'auto') t = t.replace(german, '').replace(english, '');
+  else                          t = t.replace(german, '');
+  return t.replace(/[ \t]{2,}/g, ' ').trim();
+}
+
+function cleanTranscript(text, language = 'german') {
+  let t = stripFillers(text, language);
 
   // Word-level sliding window dedup: if a run of 6+ consecutive words already
   // appeared in the preceding 100 words, skip it. Catches Whisper repetition
@@ -1051,7 +1065,14 @@ async function processBlob(blob) {
       const diarResult = await workerRun('diarize', { audio: audio.buffer }, [audio.buffer]);
       hideProgress();
       transcript = mergeTranscriptWithSpeakers(asrResult.chunks ?? [], diarResult.segments ?? []);
-      if (!transcript) transcript = cleanTranscript((asrResult.text ?? '').trim(), lang);
+      if (transcript) {
+        transcript = transcript.split('\n').map(line => {
+          const m = line.match(/^(Sprecher \d+: )([\s\S]*)$/);
+          return m ? m[1] + stripFillers(m[2], lang) : stripFillers(line, lang);
+        }).join('\n');
+      } else {
+        transcript = cleanTranscript((asrResult.text ?? '').trim(), lang);
+      }
     } else {
       transcript = cleanTranscript((asrResult.text ?? '').trim(), lang);
     }
@@ -1232,7 +1253,7 @@ document.getElementById('regen-btn').addEventListener('click', async () => {
 
 function setAllBusy(busy) {
   isBusy = busy;
-  uploadBtn.disabled  = busy || !fileInput.files[0];
+  uploadBtn.disabled  = busy || !(draggedFile || fileInput.files[0]);
   recordBtn.disabled  = busy;
   const regenBtn = document.getElementById('regen-btn');
   if (busy) regenBtn.disabled = true;
@@ -1286,7 +1307,7 @@ function dedupSeam(existing, newText, windowWords = 30) {
   const eWords = existing.trim().split(/\s+/);
   const nWords = newText.trim().split(/\s+/);
   const hay = eWords.slice(-windowWords).map(w => w.toLowerCase()).join(' ');
-  for (let len = Math.min(windowWords, nWords.length); len >= 6; len--) {
+  for (let len = Math.min(windowWords, nWords.length); len >= 4; len--) {
     if (hay.includes(nWords.slice(0, len).map(w => w.toLowerCase()).join(' '))) {
       return nWords.slice(len).join(' ');
     }
@@ -1339,14 +1360,19 @@ function mergeTranscriptWithSpeakers(chunks, segments) {
 
     const spk = label(dominantId);
     if (spk !== curSpeaker) {
-      if (curText.trim() && curSpeaker !== null) parts.push(`${curSpeaker}: ${curText.trim()}`);
+      if (curSpeaker !== null && curText.trim()) parts.push(`${curSpeaker}: ${curText.trim()}`);
+      // Carry orphan text (accumulated before first speaker) into the first labelled block
+      const orphan = curSpeaker === null ? curText : '';
       curSpeaker = spk;
-      curText = chunk.text;
+      curText = orphan + chunk.text;
     } else {
       curText += chunk.text;
     }
   }
-  if (curText.trim() && curSpeaker !== null) parts.push(`${curSpeaker}: ${curText.trim()}`);
+  if (curText.trim()) {
+    if (curSpeaker !== null) parts.push(`${curSpeaker}: ${curText.trim()}`);
+    else parts.push(curText.trim()); // no speaker found at all — emit plain
+  }
 
   return parts.join('\n');
 }
@@ -1384,13 +1410,18 @@ async function refreshStorageInfo() {
 }
 
 async function deleteModels() {
+  if (isBusy) { setStatus('Während der Verarbeitung können keine Modelle gelöscht werden.', 'error'); return; }
+  if (llmEngine) {
+    try { await llmEngine.delete(); } catch {}
+    llmEngine = null;
+  }
+  if (modelObjectUrl) { URL.revokeObjectURL(modelObjectUrl); modelObjectUrl = null; }
   try {
     const root = await navigator.storage.getDirectory();
     await root.removeEntry('gemma-cache', { recursive: true });
   } catch { /* already gone */ }
   const keys = await caches.keys();
   await Promise.all(keys.filter(k => k.toLowerCase().includes('transformers')).map(k => caches.delete(k)));
-  llmEngine = null; // engine held a blob URL that no longer exists
   await refreshStorageInfo();
 }
 
@@ -1446,7 +1477,7 @@ function restoreSession(saved) {
 }
 
 window.addEventListener('beforeunload', e => {
-  if (isBusy) { e.preventDefault(); e.returnValue = ''; }
+  if (isBusy || mediaRecorder?.state === 'recording') { e.preventDefault(); e.returnValue = ''; }
 });
 
 // Initialise storage info and session restore offer

@@ -55,7 +55,8 @@ RUN --mount=type=secret,id=hf_token \
               preprocessor_config.json special_tokens_map.json vocab.json merges.txt \
               normalizer.json added_tokens.json quantize_config.json; do \
       curl -fsSL --retry 3 --retry-delay 10 -K /tmp/hf.curlrc "${BASE}/${f}" -o "${DEST}/${f}"; \
-    done
+    done && \
+    rm -f /tmp/hf.curlrc
 
 # ── Whisper ONNX weights (~560 MB total) ──────────────────────────────────
 RUN --mount=type=secret,id=hf_token \
@@ -65,7 +66,8 @@ RUN --mount=type=secret,id=hf_token \
     BASE=https://huggingface.co/onnx-community/whisper-large-v3-turbo/resolve/main/onnx && \
     DEST=models/onnx-community/whisper-large-v3-turbo/resolve/main/onnx && \
     curl -fsSL --retry 3 --retry-delay 10 -K /tmp/hf.curlrc \
-      "${BASE}/encoder_model_fp16.onnx" -o "${DEST}/encoder_model_fp16.onnx"
+      "${BASE}/encoder_model_fp16.onnx" -o "${DEST}/encoder_model_fp16.onnx" && \
+    rm -f /tmp/hf.curlrc
 RUN --mount=type=secret,id=hf_token \
     if [ -s /run/secrets/hf_token ]; then \
       echo "header = \"Authorization: Bearer $(cat /run/secrets/hf_token)\"" > /tmp/hf.curlrc; \
@@ -73,7 +75,8 @@ RUN --mount=type=secret,id=hf_token \
     BASE=https://huggingface.co/onnx-community/whisper-large-v3-turbo/resolve/main/onnx && \
     DEST=models/onnx-community/whisper-large-v3-turbo/resolve/main/onnx && \
     curl -fsSL --retry 3 --retry-delay 10 -K /tmp/hf.curlrc \
-      "${BASE}/decoder_model_merged_q4.onnx" -o "${DEST}/decoder_model_merged_q4.onnx"
+      "${BASE}/decoder_model_merged_q4.onnx" -o "${DEST}/decoder_model_merged_q4.onnx" && \
+    rm -f /tmp/hf.curlrc
 
 # ── Pyannote speaker diarization model (~6 MB) ────────────────────────────
 RUN --mount=type=secret,id=hf_token \
@@ -86,7 +89,8 @@ RUN --mount=type=secret,id=hf_token \
       curl -fsSL --retry 3 --retry-delay 10 -K /tmp/hf.curlrc "${BASE}/${f}" -o "${DEST}/${f}"; \
     done && \
     curl -fsSL --retry 3 --retry-delay 10 -K /tmp/hf.curlrc \
-      "${BASE}/onnx/model.onnx" -o "${DEST}/onnx/model.onnx"
+      "${BASE}/onnx/model.onnx" -o "${DEST}/onnx/model.onnx" && \
+    rm -f /tmp/hf.curlrc
 
 # ── Gemma 4 E4B model (~3.5 GB) ───────────────────────────────────────────
 RUN --mount=type=secret,id=hf_token \
@@ -95,7 +99,8 @@ RUN --mount=type=secret,id=hf_token \
     else touch /tmp/hf.curlrc; fi && \
     curl -fsSL --retry 3 --retry-delay 10 -K /tmp/hf.curlrc \
       'https://huggingface.co/litert-community/gemma-4-E4B-it-litert-lm/resolve/main/gemma-4-E4B-it-web.litertlm' \
-      -o models/gemma/gemma-4-E4B-it-web.litertlm
+      -o models/gemma/gemma-4-E4B-it-web.litertlm && \
+    rm -f /tmp/hf.curlrc
 
 # Stage 2 — minimal production image
 FROM node:22-alpine

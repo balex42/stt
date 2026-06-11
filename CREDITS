@@ -26,3 +26,9 @@ This project builds on the following open-source libraries and models.
 - License: Apache 2.0 (https://ai.google.dev/gemma/apache_2)
 - Copyright: Google DeepMind
 - Source: https://huggingface.co/google/gemma-4-E4B-it
+
+## pyannote/segmentation-3.0 (ONNX)
+- Model ID: onnx-community/pyannote-segmentation-3.0
+- Base model license: MIT
+- Copyright: Hervé Bredin / pyannote contributors
+- Source: https://huggingface.co/pyannote/segmentation-3.0
