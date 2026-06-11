@@ -179,6 +179,22 @@
 
   .action-row { margin-top: 1rem; display: flex; justify-content: flex-end; align-items: center; gap: 0.5rem; }
 
+  .lang-select {
+    margin-left: auto;
+    padding: 0.4rem 0.6rem; border-radius: 8px;
+    border: 1px solid #2d3348; background: #0f1117; color: #94a3b8;
+    font-size: 0.88rem; cursor: pointer; outline: none;
+  }
+  .lang-select:focus { border-color: #3b82f6; }
+
+  .result-header {
+    display: flex; justify-content: space-between; align-items: center;
+    margin-bottom: 0.6rem;
+  }
+  .result-header h2 { margin-bottom: 0; }
+
+  .file-label.drag-over { border-color: #3b82f6; color: #e2e8f0; background: #1a2236; }
+
   footer {
     max-width: 960px;
     margin: 0 auto 2rem;
@@ -212,6 +228,11 @@
   <div class="tabs">
     <button class="tab active" data-tab="upload">Datei hochladen</button>
     <button class="tab" data-tab="record">Live-Aufnahme</button>
+    <select id="lang-select" class="lang-select">
+      <option value="german">Deutsch</option>
+      <option value="english">English</option>
+      <option value="auto">Auto</option>
+    </select>
   </div>
 
   <div class="tab-panel active" id="tab-upload">
@@ -239,11 +260,17 @@
 <div class="card" id="results">
   <div class="results-grid">
     <div class="result-box">
-      <h2>Rohtranskript</h2>
+      <div class="result-header">
+        <h2>Rohtranskript</h2>
+        <button class="btn-link" id="copy-transcript-btn">Kopieren</button>
+      </div>
       <textarea id="transcript-out" spellcheck="false"></textarea>
     </div>
     <div class="result-box">
-      <h2>Meetingprotokoll</h2>
+      <div class="result-header">
+        <h2>Meetingprotokoll</h2>
+        <button class="btn-link" id="copy-protocol-btn">Kopieren</button>
+      </div>
       <div class="protocol-content" id="protocol-out"></div>
     </div>
   </div>
@@ -329,7 +356,7 @@ self.addEventListener('message', async ({ data: msg }) => {
 
       const result = await asr(new Float32Array(msg.audio), {
         task: 'transcribe',
-        language: 'german',
+        language: msg.language ?? 'german',
         return_timestamps: true,
         chunk_length_s: 30,
         stride_length_s: 5,
@@ -341,6 +368,31 @@ self.addEventListener('message', async ({ data: msg }) => {
     } catch (e) { self.postMessage({ type: 'error', message: e.message }); }
   }
 });
+`;
+
+// ---------------------------------------------------------------------------
+// AudioWorklet PCM capture processor (inlined as a blob URL at runtime)
+// ---------------------------------------------------------------------------
+const WORKLET_SRC = `
+class PcmCapture extends AudioWorkletProcessor {
+  constructor() { super(); this._buf = []; }
+  process(inputs) {
+    const ch = inputs[0]?.[0];
+    if (ch) {
+      this._buf.push(new Float32Array(ch));
+      const total = this._buf.reduce((s, a) => s + a.length, 0);
+      if (total >= 1024) {
+        const out = new Float32Array(total);
+        let offset = 0;
+        for (const a of this._buf) { out.set(a, offset); offset += a.length; }
+        this.port.postMessage(out, [out.buffer]);
+        this._buf = [];
+      }
+    }
+    return true;
+  }
+}
+registerProcessor('pcm-capture', PcmCapture);
 `;
 
 // ---------------------------------------------------------------------------
@@ -383,6 +435,18 @@ let litrtLmLoadPromise = null;
 let lastData           = null;
 let isBusy             = false;
 
+// Live recording state
+let liveCtx            = null;
+let liveSamples        = [];
+let liveSampleCount    = 0;
+let liveOverlapSamples = [];
+let liveTranscribeQueue = Promise.resolve();
+let liveMode           = false;  // suppresses workerRun's partial-overwrite behaviour
+const LIVE_SEGMENT_SAMPLES = 25 * 16000;
+const LIVE_OVERLAP_SAMPLES = 3  * 16000;
+
+let draggedFile = null;  // set by drag-drop onto the upload label
+
 // ---------------------------------------------------------------------------
 // Tab switching
 // ---------------------------------------------------------------------------
@@ -403,14 +467,28 @@ const uploadBtn  = document.getElementById('upload-btn');
 const fileNameEl = document.getElementById('file-name');
 
 fileInput.addEventListener('change', () => {
+  draggedFile = null;
   const f = fileInput.files[0];
   fileNameEl.textContent = f ? f.name : 'Keine Datei ausgewählt';
   uploadBtn.disabled = !f;
 });
 
 uploadBtn.addEventListener('click', () => {
-  const f = fileInput.files[0];
+  const f = draggedFile || fileInput.files[0];
   if (f) processBlob(f);
+});
+
+const fileLabel = document.querySelector('.file-label');
+fileLabel.addEventListener('dragover', e => { e.preventDefault(); fileLabel.classList.add('drag-over'); });
+fileLabel.addEventListener('dragleave', () => fileLabel.classList.remove('drag-over'));
+fileLabel.addEventListener('drop', e => {
+  e.preventDefault();
+  fileLabel.classList.remove('drag-over');
+  const f = e.dataTransfer.files[0];
+  if (!f) return;
+  draggedFile = f;
+  fileNameEl.textContent = f.name;
+  uploadBtn.disabled = false;
 });
 
 // ---------------------------------------------------------------------------
@@ -433,25 +511,100 @@ recordBtn.addEventListener('click', async () => {
     } catch (e) {
       setStatus('Mikrofonzugriff verweigert: ' + e.message, 'error'); return;
     }
+
+    // Load ASR worker upfront (stream stays open while we wait)
+    if (!asrReady) {
+      recordBtn.disabled = true;
+      showProgress('Whisper-Modell wird heruntergeladen…');
+      try {
+        await workerRun('load', { model: WHISPER_MODEL, baseUrl: window.location.origin, localVendor: useLocalVendor });
+        asrReady = true;
+      } catch (e) {
+        stream.getTracks().forEach(t => t.stop());
+        hideProgress();
+        setStatus('Modellfehler: ' + e.message, 'error');
+        recordBtn.disabled = false;
+        return;
+      }
+      hideProgress();
+      recordBtn.disabled = false;
+    }
+
+    // Reset live state
+    liveSamples = []; liveSampleCount = 0; liveOverlapSamples = [];
+    liveTranscribeQueue = Promise.resolve();
+    liveMode = true;
+    resetResults();
+    document.getElementById('results').style.display = 'block';
+
+    // 16 kHz AudioContext for direct PCM capture (avoids unreliable webm chunk decode)
+    liveCtx = new AudioContext({ sampleRate: 16000 });
+    const source = liveCtx.createMediaStreamSource(stream);
+
+    let captureNode;
+    try {
+      const wUrl = URL.createObjectURL(new Blob([WORKLET_SRC], { type: 'application/javascript' }));
+      await liveCtx.audioWorklet.addModule(wUrl);
+      URL.revokeObjectURL(wUrl);
+      captureNode = new AudioWorkletNode(liveCtx, 'pcm-capture');
+      captureNode.port.onmessage = e => onLivePCM(e.data);
+      source.connect(captureNode);
+    } catch {
+      // ScriptProcessorNode fallback (deprecated but universally supported)
+      captureNode = liveCtx.createScriptProcessor(4096, 1, 1);
+      captureNode.onaudioprocess = e => onLivePCM(new Float32Array(e.inputBuffer.getChannelData(0)));
+      source.connect(captureNode);
+      captureNode.connect(liveCtx.destination);
+    }
+
     recordChunks = [];
     mediaRecorder = new MediaRecorder(stream);
     mediaRecorder.ondataavailable = e => { if (e.data.size) recordChunks.push(e.data); };
-    mediaRecorder.onstop = () => {
+    mediaRecorder.onstop = async () => {
       stream.getTracks().forEach(t => t.stop());
-      const mime = mediaRecorder.mimeType || 'audio/webm';
-      const blob = new Blob(recordChunks, { type: mime });
-      processBlob(blob);
+      try { captureNode.disconnect(); } catch {}
+      await liveCtx.close();
+      liveCtx = null;
+
+      setAllBusy(true);
+      const lang = document.getElementById('lang-select').value;
+      try {
+        await liveTranscribeQueue;
+
+        // Transcribe final remainder (overlap + anything not yet dispatched)
+        const remaining = concatFloat32([...liveOverlapSamples, ...liveSamples]);
+        if (remaining.length > 0) {
+          const res = await workerRun('transcribe', {
+            audio: remaining.buffer,
+            language: lang === 'auto' ? null : lang,
+          }, [remaining.buffer]);
+          if ((res.text ?? '').trim()) appendLiveTranscript(res.text.trim());
+        }
+
+        liveMode = false;
+        const transcriptEl = document.getElementById('transcript-out');
+        const transcript = cleanTranscript(transcriptEl.value.trim(), lang);
+        transcriptEl.value = transcript || '(leer)';
+        document.getElementById('regen-btn').disabled = !transcript;
+
+        if (transcript) await generateProtocol(transcript, getMeta());
+      } catch (e) {
+        liveMode = false;
+        setStatus('Fehler: ' + e.message, 'error');
+        console.error(e);
+      } finally {
+        setAllBusy(false);
+      }
     };
     mediaRecorder.start();
-    elapsed = 0;
-    timerEl.textContent = '0:00';
+
+    elapsed = 0; timerEl.textContent = '0:00';
     recDot.classList.add('pulse');
     recordBtn.textContent = 'Stoppen & Transkribieren';
     recordBtn.classList.replace('btn-primary', 'btn-danger');
     timerInterval = setInterval(() => {
       elapsed++;
-      const m = Math.floor(elapsed / 60), s = elapsed % 60;
-      timerEl.textContent = `${m}:${s.toString().padStart(2,'0')}`;
+      timerEl.textContent = `${Math.floor(elapsed/60)}:${(elapsed%60).toString().padStart(2,'0')}`;
     }, 1000);
     setStatus('Aufnahme läuft…', 'info');
   } else {
@@ -553,19 +706,22 @@ function workerRun(type, payload, transfer = []) {
     const { totalDuration, ...workerPayload } = payload;
     let windowOffsetS = 0;
     let lastChunkTs   = -Infinity;
+    const wallStart   = Date.now();
 
     const handler = ({ data }) => {
       switch (data.type) {
         case 'progress':
           updateProgress(data.data.progress ?? 0, data.data.file ?? '', data.data.status);
           break;
-        case 'partial': {
-          const out = document.getElementById('transcript-out');
-          out.value = data.text;
-          out.scrollTop = out.scrollHeight;
-          document.getElementById('results').style.display = 'block';
+        case 'partial':
+          // In live mode the transcript is built by appendLiveTranscript; don't overwrite it.
+          if (!liveMode) {
+            const out = document.getElementById('transcript-out');
+            out.value = data.text;
+            out.scrollTop = out.scrollHeight;
+            document.getElementById('results').style.display = 'block';
+          }
           break;
-        }
         case 'chunk':
           // Streamer timestamps are relative to the current 30 s window.
           // A significant backward jump signals a new audio window: bump the offset.
@@ -575,8 +731,17 @@ function workerRun(type, payload, transfer = []) {
             const cur = totalDuration
               ? Math.min(windowOffsetS + data.timestamp, totalDuration)
               : windowOffsetS + data.timestamp;
+
+            // ETA: stable after ~20 s of audio processed
+            let eta = '';
+            if (totalDuration && cur > 20) {
+              const speed = cur / ((Date.now() - wallStart) / 1000);
+              const rem   = (totalDuration - cur) / speed;
+              if (rem > 5) eta = ' · ≈ ' + fmtTime(rem) + ' verbleibend';
+            }
+
             const label = totalDuration
-              ? 'Transkription ' + fmtTime(cur) + ' / ' + fmtTime(totalDuration)
+              ? 'Transkription ' + fmtTime(cur) + ' / ' + fmtTime(totalDuration) + eta
               : 'Transkription bei ' + fmtTime(cur);
             setStatus('<span class="spinner"></span>' + label + '…', 'info');
           }
@@ -600,9 +765,13 @@ function workerRun(type, payload, transfer = []) {
 // ---------------------------------------------------------------------------
 // Transcript post-processing
 // ---------------------------------------------------------------------------
-function cleanTranscript(text) {
-  // Strip German filler words (äh, ähm, äm, hm)
-  let t = text.replace(/\b(äh+m?|äm+|eh+m?|hm+)\b[\s,]*/gi, '');
+function cleanTranscript(text, language = 'german') {
+  const german  = /\b(äh+m?|äm+|eh+m?|hm+)\b[\s,]*/gi;
+  const english = /\b(uh+|um+|erm+|er)\b[\s,]*/gi;
+  let t = text;
+  if (language === 'english')      { t = t.replace(english, ''); }
+  else if (language === 'auto')    { t = t.replace(german, '').replace(english, ''); }
+  else                             { t = t.replace(german, ''); }  // german (default)
   t = t.replace(/[ \t]{2,}/g, ' ').trim();
 
   // Word-level sliding window dedup: if a run of 6+ consecutive words already
@@ -805,14 +974,15 @@ async function processBlob(blob) {
       hideProgress();
     }
 
+    const lang = document.getElementById('lang-select').value;
     const totalDuration = audio.length / 16000;
     setStatus('<span class="spinner"></span>Transkription läuft… (' + fmtTime(totalDuration) + ' insgesamt)', 'info');
     const asrResult = await workerRun(
       'transcribe',
-      { audio: audio.buffer, totalDuration },
+      { audio: audio.buffer, totalDuration, language: lang === 'auto' ? null : lang },
       [audio.buffer],
     );
-    const transcript = cleanTranscript((asrResult.text ?? '').trim());
+    const transcript = cleanTranscript((asrResult.text ?? '').trim(), lang);
     const transcriptEl = document.getElementById('transcript-out');
     transcriptEl.value = transcript || '(leer)';
     document.getElementById('results').style.display = 'block';
@@ -1000,6 +1170,74 @@ function setAllBusy(busy) {
 }
 
 document.getElementById('meta-date').value = new Date().toISOString().slice(0, 10);
+
+// ---------------------------------------------------------------------------
+// 4.2 Live transcription helpers
+// ---------------------------------------------------------------------------
+function concatFloat32(arrays) {
+  const total = arrays.reduce((s, a) => s + a.length, 0);
+  const out = new Float32Array(total);
+  let offset = 0;
+  for (const a of arrays) { out.set(a, offset); offset += a.length; }
+  return out;
+}
+
+function onLivePCM(samples) {
+  liveSamples.push(samples);
+  liveSampleCount += samples.length;
+
+  if (liveSampleCount < LIVE_SEGMENT_SAMPLES) return;
+
+  // Build segment: previous overlap + all new samples
+  const overlap  = concatFloat32(liveOverlapSamples);
+  const allNew   = concatFloat32(liveSamples);
+  const segment  = new Float32Array(overlap.length + allNew.length);
+  segment.set(overlap);
+  segment.set(allNew, overlap.length);
+
+  // Save tail of segment as overlap for the next dispatch
+  liveOverlapSamples = [segment.slice(-LIVE_OVERLAP_SAMPLES)];
+  liveSamples = []; liveSampleCount = 0;
+
+  const lang = document.getElementById('lang-select').value;
+  liveTranscribeQueue = liveTranscribeQueue.then(async () => {
+    const res = await workerRun('transcribe', {
+      audio: segment.buffer,
+      language: lang === 'auto' ? null : lang,
+    }, [segment.buffer]);
+    if ((res.text ?? '').trim()) appendLiveTranscript(res.text.trim());
+  }).catch(e => console.error('Live segment error:', e));
+}
+
+function dedupSeam(existing, newText, windowWords = 30) {
+  const eWords = existing.trim().split(/\s+/);
+  const nWords = newText.trim().split(/\s+/);
+  const hay = eWords.slice(-windowWords).map(w => w.toLowerCase()).join(' ');
+  for (let len = Math.min(windowWords, nWords.length); len >= 6; len--) {
+    if (hay.includes(nWords.slice(0, len).map(w => w.toLowerCase()).join(' '))) {
+      return nWords.slice(len).join(' ');
+    }
+  }
+  return newText;
+}
+
+function appendLiveTranscript(newText) {
+  if (!newText) return;
+  const el = document.getElementById('transcript-out');
+  const existing = el.value;
+  el.value = existing ? (existing + ' ' + dedupSeam(existing, newText)).trim() : newText;
+  el.scrollTop = el.scrollHeight;
+  document.getElementById('results').style.display = 'block';
+}
+
+// ---------------------------------------------------------------------------
+// 4.4 Copy buttons
+// ---------------------------------------------------------------------------
+document.getElementById('copy-transcript-btn').addEventListener('click', () =>
+  navigator.clipboard.writeText(document.getElementById('transcript-out').value).catch(() => {}));
+
+document.getElementById('copy-protocol-btn').addEventListener('click', () =>
+  navigator.clipboard.writeText(document.getElementById('protocol-out').innerText).catch(() => {}));
 
 // ---------------------------------------------------------------------------
 // 3.1 Storage management
