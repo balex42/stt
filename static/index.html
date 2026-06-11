@@ -189,6 +189,12 @@
   }
   footer a { color: #64748b; text-decoration: underline; }
   footer a:hover { color: #94a3b8; }
+  #storage-info { margin-top: 0.4rem; }
+  .btn-link {
+    background: none; border: none; color: #64748b; cursor: pointer;
+    font-size: 0.78rem; text-decoration: underline; padding: 0;
+  }
+  .btn-link:hover { color: #94a3b8; }
 </style>
 </head>
 <body>
@@ -251,6 +257,7 @@
   Built with <a href="https://ai.google.dev/gemma" target="_blank" rel="noopener">Gemma 4</a> (Google DeepMind, Apache 2.0) &middot;
   Transcription by <a href="https://openai.com/research/whisper" target="_blank" rel="noopener">Whisper</a> (OpenAI, MIT) via
   <a href="https://github.com/huggingface/transformers.js" target="_blank" rel="noopener">Transformers.js</a> (Apache 2.0)
+  <div id="storage-info"></div>
 </footer>
 
 <script type="module">
@@ -368,12 +375,13 @@ const GEMMA_MODEL = useLocalVendor
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
-let asrWorker         = null;
-let asrReady          = false;
-let llmEngine         = null;
-let modelObjectUrl    = null;
+let asrWorker          = null;
+let asrReady           = false;
+let llmEngine          = null;
+let modelObjectUrl     = null;
 let litrtLmLoadPromise = null;
-let lastData          = null;
+let lastData           = null;
+let isBusy             = false;
 
 // ---------------------------------------------------------------------------
 // Tab switching
@@ -511,6 +519,9 @@ async function fetchWithOPFSCache(url, onProgress) {
 
     // Mark as complete so the next load skips re-downloading.
     await (await dir.getFileHandle(filename + '.done', { create: true })).createWritable().then(w => w.close());
+
+    // Request persistent storage so Chrome doesn't evict the downloaded model.
+    navigator.storage.persist().catch(() => {});
 
     const file = await (await dir.getFileHandle(filename)).getFile();
     return URL.createObjectURL(file);
@@ -690,6 +701,7 @@ async function streamConversation(systemPrompt, userMessage, showCounter = false
       }
     }
   }
+  await conv.delete();
   return buffer;
 }
 
@@ -767,6 +779,7 @@ async function generateProtocol(transcript, meta = {}) {
   }
 
   lastData = { transcript, protocol, meta };
+  saveSession(lastData);
   renderProtocol(protocol, meta);
   document.getElementById('download-btn').disabled = false;
   document.getElementById('regen-btn').disabled = false;
@@ -975,6 +988,7 @@ document.getElementById('regen-btn').addEventListener('click', async () => {
 });
 
 function setAllBusy(busy) {
+  isBusy = busy;
   uploadBtn.disabled  = busy || !fileInput.files[0];
   recordBtn.disabled  = busy;
   const regenBtn = document.getElementById('regen-btn');
@@ -986,6 +1000,99 @@ function setAllBusy(busy) {
 }
 
 document.getElementById('meta-date').value = new Date().toISOString().slice(0, 10);
+
+// ---------------------------------------------------------------------------
+// 3.1 Storage management
+// ---------------------------------------------------------------------------
+function fmtBytes(bytes) {
+  if (bytes >= 1e9) return (bytes / 1e9).toFixed(1).replace('.', ',') + ' GB';
+  if (bytes >= 1e6) return Math.round(bytes / 1e6) + ' MB';
+  return Math.round(bytes / 1e3) + ' KB';
+}
+
+async function refreshStorageInfo() {
+  const el = document.getElementById('storage-info');
+  if (!el) return;
+  try {
+    const { usage } = await navigator.storage.estimate();
+    el.innerHTML =
+      `Lokale Modelle: ${fmtBytes(usage ?? 0)} belegt · ` +
+      `<button class="btn-link" id="delete-models-btn">Modelle löschen</button>`;
+    document.getElementById('delete-models-btn').addEventListener('click', deleteModels);
+  } catch {
+    el.textContent = '';
+  }
+}
+
+async function deleteModels() {
+  try {
+    const root = await navigator.storage.getDirectory();
+    await root.removeEntry('gemma-cache', { recursive: true });
+  } catch { /* already gone */ }
+  const keys = await caches.keys();
+  await Promise.all(keys.filter(k => k.toLowerCase().includes('transformers')).map(k => caches.delete(k)));
+  llmEngine = null; // engine held a blob URL that no longer exists
+  await refreshStorageInfo();
+}
+
+// ---------------------------------------------------------------------------
+// 3.3 Session persistence + unload guard
+// ---------------------------------------------------------------------------
+const SESSION_KEY = 'meetingprotokoll_session';
+
+function saveSession(data) {
+  try {
+    localStorage.setItem(SESSION_KEY, JSON.stringify({ ...data, timestamp: new Date().toISOString() }));
+  } catch { /* quota exceeded — silently skip */ }
+}
+
+function checkSavedSession() {
+  try {
+    const raw = localStorage.getItem(SESSION_KEY);
+    if (!raw) return;
+    const saved = JSON.parse(raw);
+    if (!saved.transcript || !saved.protocol) return;
+    const time = new Date(saved.timestamp).toLocaleString('de-DE', { dateStyle: 'short', timeStyle: 'short' });
+    const el = document.getElementById('status');
+    el.className = 'info';
+    el.innerHTML =
+      `Letzte Sitzung vom ${time} wiederherstellen? ` +
+      `<button class="btn btn-ghost" style="padding:.2rem .75rem;font-size:.8rem;margin:0 .25rem" id="restore-btn">Wiederherstellen</button>` +
+      `<button class="btn btn-ghost" style="padding:.2rem .75rem;font-size:.8rem" id="dismiss-session-btn">Verwerfen</button>`;
+    document.getElementById('restore-btn').addEventListener('click', () => restoreSession(saved));
+    document.getElementById('dismiss-session-btn').addEventListener('click', () => {
+      localStorage.removeItem(SESSION_KEY);
+      el.innerHTML = '';
+      el.className = '';
+    });
+  } catch { /* corrupted storage — ignore */ }
+}
+
+function restoreSession(saved) {
+  lastData = { transcript: saved.transcript, protocol: saved.protocol, meta: saved.meta ?? {} };
+  const { transcript, protocol, meta } = lastData;
+
+  if (meta.title)        document.getElementById('meta-title').value = meta.title;
+  if (meta.date)         document.getElementById('meta-date').value  = meta.date;
+  if (meta.participants) document.getElementById('meta-participants').value = meta.participants;
+
+  document.getElementById('transcript-out').value = transcript;
+  renderProtocol(protocol, meta);
+
+  document.getElementById('results').style.display = 'block';
+  document.getElementById('regen-btn').disabled    = false;
+  document.getElementById('download-btn').disabled = false;
+
+  setStatus('', '');
+}
+
+window.addEventListener('beforeunload', e => {
+  if (isBusy) { e.preventDefault(); e.returnValue = ''; }
+});
+
+// Initialise storage info and session restore offer
+refreshStorageInfo();
+checkSavedSession();
 </script>
 </body>
 </html>
