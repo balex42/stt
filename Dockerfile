@@ -10,6 +10,7 @@ RUN apk add --no-cache curl
 WORKDIR /out
 RUN mkdir -p vendor/ort vendor/litert-lm-wasm \
     models/onnx-community/whisper-large-v3-turbo/resolve/main/onnx \
+    models/onnx-community/pyannote-segmentation-3.0/resolve/main/onnx \
     models/gemma
 
 # ── Install packages and build self-contained ESM bundles with esbuild ─────
@@ -73,6 +74,19 @@ RUN --mount=type=secret,id=hf_token \
     DEST=models/onnx-community/whisper-large-v3-turbo/resolve/main/onnx && \
     curl -fsSL --retry 3 --retry-delay 10 -K /tmp/hf.curlrc \
       "${BASE}/decoder_model_merged_q4.onnx" -o "${DEST}/decoder_model_merged_q4.onnx"
+
+# ── Pyannote speaker diarization model (~6 MB) ────────────────────────────
+RUN --mount=type=secret,id=hf_token \
+    if [ -s /run/secrets/hf_token ]; then \
+      echo "header = \"Authorization: Bearer $(cat /run/secrets/hf_token)\"" > /tmp/hf.curlrc; \
+    else touch /tmp/hf.curlrc; fi && \
+    BASE=https://huggingface.co/onnx-community/pyannote-segmentation-3.0/resolve/main && \
+    DEST=models/onnx-community/pyannote-segmentation-3.0/resolve/main && \
+    for f in config.json preprocessor_config.json; do \
+      curl -fsSL --retry 3 --retry-delay 10 -K /tmp/hf.curlrc "${BASE}/${f}" -o "${DEST}/${f}"; \
+    done && \
+    curl -fsSL --retry 3 --retry-delay 10 -K /tmp/hf.curlrc \
+      "${BASE}/onnx/model.onnx" -o "${DEST}/onnx/model.onnx"
 
 # ── Gemma 4 E4B model (~3.5 GB) ───────────────────────────────────────────
 RUN --mount=type=secret,id=hf_token \

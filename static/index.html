@@ -195,6 +195,13 @@
 
   .file-label.drag-over { border-color: #3b82f6; color: #e2e8f0; background: #1a2236; }
 
+  .diar-label {
+    display: flex; align-items: center; gap: 0.4rem;
+    font-size: 0.88rem; color: #94a3b8; cursor: pointer; white-space: nowrap;
+    padding: 0.4rem 0; user-select: none;
+  }
+  .diar-label input[type=checkbox] { cursor: pointer; accent-color: #3b82f6; }
+
   footer {
     max-width: 960px;
     margin: 0 auto 2rem;
@@ -233,6 +240,10 @@
       <option value="english">English</option>
       <option value="auto">Auto</option>
     </select>
+    <label class="diar-label">
+      <input type="checkbox" id="diar-check">
+      Sprechererkennung
+    </label>
   </div>
 
   <div class="tab-panel active" id="tab-upload">
@@ -303,6 +314,7 @@ Regeln:
 - "aufgaben": Nur konkrete Aufträge mit erkennbarem Verantwortlichen oder Termin; vage Absichten weglassen
 - "hauptthemen": Die inhaltlichen Schwerpunkte als prägnante Stichpunkte
 - Wenn Teilnehmer angegeben sind, weise Aufgaben ("verantwortlich") bevorzugt diesen Personen zu.
+- Wenn im Transkript Sprecherbezeichnungen ("Sprecher N:") vorhanden sind, nutze diese für "verantwortlich". Eine Teilnehmerliste kann Namen zu Sprechern zuordnen, aber nur wenn das Transkript diese Zuordnung explizit macht — kein Raten.
 
 Schema (strikt einhalten):
 {
@@ -318,8 +330,10 @@ Leere Felder: leere Liste [] oder null.`;
 // Whisper Web Worker source (runs inference off the main thread)
 // ---------------------------------------------------------------------------
 const WHISPER_WORKER_SRC = `
-let pipeline, WhisperTextStreamer, env;
+let pipeline, WhisperTextStreamer, AutoModelForAudioFrameClassification, AutoProcessor, env;
 let asr = null;
+let diarProcessor = null, diarModel = null;
+const DIAR_MODEL = 'onnx-community/pyannote-segmentation-3.0';
 
 self.addEventListener('message', async ({ data: msg }) => {
   if (msg.type === 'load') {
@@ -327,7 +341,7 @@ self.addEventListener('message', async ({ data: msg }) => {
       const tfUrl = msg.localVendor
         ? msg.baseUrl + '/vendor/transformers.js'
         : 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3/+esm';
-      ({ pipeline, WhisperTextStreamer, env } = await import(tfUrl));
+      ({ pipeline, WhisperTextStreamer, AutoModelForAudioFrameClassification, AutoProcessor, env } = await import(tfUrl));
       if (msg.localVendor) {
         env.backends.onnx.wasm.wasmPaths = msg.baseUrl + '/vendor/ort/';
         env.remoteHost = msg.baseUrl + '/models';
@@ -364,7 +378,27 @@ self.addEventListener('message', async ({ data: msg }) => {
         no_repeat_ngram_size: 5,
         streamer,
       });
-      self.postMessage({ type: 'complete', text: result.text ?? accumulated });
+      self.postMessage({ type: 'complete', text: result.text ?? accumulated, chunks: result.chunks ?? [] });
+    } catch (e) { self.postMessage({ type: 'error', message: e.message }); }
+    return;
+  }
+
+  if (msg.type === 'diarize') {
+    try {
+      if (!diarProcessor) {
+        diarProcessor = await AutoProcessor.from_pretrained(DIAR_MODEL, {
+          progress_callback: p => self.postMessage({ type: 'progress', data: p }),
+        });
+        diarModel = await AutoModelForAudioFrameClassification.from_pretrained(DIAR_MODEL, {
+          dtype: 'fp32',
+          progress_callback: p => self.postMessage({ type: 'progress', data: p }),
+        });
+      }
+      const audio = new Float32Array(msg.audio);
+      const inputs = await diarProcessor(audio);
+      const { logits } = await diarModel(inputs);
+      const result = diarProcessor.post_process_speaker_diarization(logits, audio.length);
+      self.postMessage({ type: 'diarized', segments: result[0] ?? [] });
     } catch (e) { self.postMessage({ type: 'error', message: e.message }); }
   }
 });
@@ -567,7 +601,8 @@ recordBtn.addEventListener('click', async () => {
       liveCtx = null;
 
       setAllBusy(true);
-      const lang = document.getElementById('lang-select').value;
+      const lang        = document.getElementById('lang-select').value;
+      const diarEnabled = document.getElementById('diar-check').checked;
       try {
         await liveTranscribeQueue;
 
@@ -583,10 +618,31 @@ recordBtn.addEventListener('click', async () => {
 
         liveMode = false;
         const transcriptEl = document.getElementById('transcript-out');
-        const transcript = cleanTranscript(transcriptEl.value.trim(), lang);
-        transcriptEl.value = transcript || '(leer)';
-        document.getElementById('regen-btn').disabled = !transcript;
 
+        let transcript;
+        if (diarEnabled) {
+          // Diarization requires the full audio — re-decode the MediaRecorder blob
+          setStatus('<span class="spinner"></span>Sprechererkennung läuft…', 'info');
+          const fullBlob  = new Blob(recordChunks, { type: mediaRecorder.mimeType || 'audio/webm' });
+          const fullAudio = await blobToFloat32(fullBlob);
+          const totalDur  = fullAudio.length / 16000;
+          const audioForTranscribe = fullAudio.buffer.slice(0);
+          showProgress('Sprechererkennung läuft…');
+          const asrFull = await workerRun('transcribe', {
+            audio: audioForTranscribe, totalDuration: totalDur,
+            language: lang === 'auto' ? null : lang, returnChunks: true,
+          }, [audioForTranscribe]);
+          const diarResult = await workerRun('diarize', { audio: fullAudio.buffer }, [fullAudio.buffer]);
+          hideProgress();
+          transcript = mergeTranscriptWithSpeakers(asrFull.chunks ?? [], diarResult.segments ?? []);
+          if (!transcript) transcript = cleanTranscript((asrFull.text ?? '').trim(), lang);
+          transcriptEl.value = transcript || '(leer)';
+        } else {
+          transcript = cleanTranscript(transcriptEl.value.trim(), lang);
+          transcriptEl.value = transcript || '(leer)';
+        }
+
+        document.getElementById('regen-btn').disabled = !transcript;
         if (transcript) await generateProtocol(transcript, getMeta());
       } catch (e) {
         liveMode = false;
@@ -748,6 +804,7 @@ function workerRun(type, payload, transfer = []) {
           break;
         case 'ready':
         case 'complete':
+        case 'diarized':
           w.removeEventListener('message', handler);
           resolve(data);
           break;
@@ -974,15 +1031,31 @@ async function processBlob(blob) {
       hideProgress();
     }
 
-    const lang = document.getElementById('lang-select').value;
+    const lang       = document.getElementById('lang-select').value;
+    const diarEnabled = document.getElementById('diar-check').checked;
     const totalDuration = audio.length / 16000;
     setStatus('<span class="spinner"></span>Transkription läuft… (' + fmtTime(totalDuration) + ' insgesamt)', 'info');
+
+    // Copy audio buffer before transfer so we can pass it to diarize afterwards
+    const audioForTranscribe = diarEnabled ? audio.buffer.slice(0) : audio.buffer;
     const asrResult = await workerRun(
       'transcribe',
-      { audio: audio.buffer, totalDuration, language: lang === 'auto' ? null : lang },
-      [audio.buffer],
+      { audio: audioForTranscribe, totalDuration, language: lang === 'auto' ? null : lang, returnChunks: diarEnabled },
+      [audioForTranscribe],
     );
-    const transcript = cleanTranscript((asrResult.text ?? '').trim(), lang);
+
+    let transcript;
+    if (diarEnabled) {
+      showProgress('Sprechererkennung läuft…');
+      setStatus('<span class="spinner"></span>Sprechererkennung läuft…', 'info');
+      const diarResult = await workerRun('diarize', { audio: audio.buffer }, [audio.buffer]);
+      hideProgress();
+      transcript = mergeTranscriptWithSpeakers(asrResult.chunks ?? [], diarResult.segments ?? []);
+      if (!transcript) transcript = cleanTranscript((asrResult.text ?? '').trim(), lang);
+    } else {
+      transcript = cleanTranscript((asrResult.text ?? '').trim(), lang);
+    }
+
     const transcriptEl = document.getElementById('transcript-out');
     transcriptEl.value = transcript || '(leer)';
     document.getElementById('results').style.display = 'block';
@@ -1228,6 +1301,54 @@ function appendLiveTranscript(newText) {
   el.value = existing ? (existing + ' ' + dedupSeam(existing, newText)).trim() : newText;
   el.scrollTop = el.scrollHeight;
   document.getElementById('results').style.display = 'block';
+}
+
+// ---------------------------------------------------------------------------
+// 5 Speaker diarization merge
+// ---------------------------------------------------------------------------
+function mergeTranscriptWithSpeakers(chunks, segments) {
+  if (!segments.length || !chunks.length) return '';
+
+  // Map pyannote's internal speaker IDs to sequential "Sprecher N" labels
+  const speakerMap = new Map();
+  let speakerCount = 0;
+  const label = id => {
+    if (!speakerMap.has(id)) speakerMap.set(id, `Sprecher ${++speakerCount}`);
+    return speakerMap.get(id);
+  };
+
+  const parts = [];
+  let curSpeaker = null;
+  let curText    = '';
+
+  for (const chunk of chunks) {
+    const [cs, ce] = chunk.timestamp ?? [null, null];
+    if (cs === null || ce === null || ce <= cs) {
+      curText += chunk.text;
+      continue;
+    }
+
+    // Dominant speaker = diarization segment with most overlap in [cs, ce]
+    let maxOverlap = 0, dominantId = null;
+    for (const seg of segments) {
+      const ov = Math.min(seg.end, ce) - Math.max(seg.start, cs);
+      if (ov > 0 && ov > maxOverlap) { maxOverlap = ov; dominantId = seg.id; }
+    }
+
+    if (dominantId === null) { curText += chunk.text; continue; }
+
+    const spk = label(dominantId);
+    if (spk !== curSpeaker) {
+      if (curText.trim() && curSpeaker !== null) parts.push(`${curSpeaker}: ${curText.trim()}`);
+      curSpeaker = spk;
+      curText = chunk.text;
+    } else {
+      curText += chunk.text;
+    }
+  }
+  if (curText.trim() && curSpeaker !== null) parts.push(`${curSpeaker}: ${curText.trim()}`);
+
+  return parts.join('\n');
 }
 
 // ---------------------------------------------------------------------------
